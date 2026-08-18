@@ -1,0 +1,24 @@
+[project]
+name = "transcript-sanitizer"
+version = "0.1.0"
+description = "Credential redaction for Claude Code session transcripts (phase 1: scaffold, recognizers, jsonl sanitizer)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "presidio-analyzer",
+    "presidio-anonymizer",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sanitize"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

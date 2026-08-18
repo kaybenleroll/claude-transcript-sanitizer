@@ -1,0 +1,2 @@
+{"type":"user","uuid":"u1","sessionId":"s1","timestamp":"2026-08-18T00:00:00Z","cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"hello there, no secrets here"}]}}
+{"type":"assistant","uuid":"u2","sessionId":"s1","timestamp":"2026-08-18T00:00:01Z","cwd":"/tmp","message":{"role":"assistant","content":[{"type":"text","text":"sure, happy to help"}]}}

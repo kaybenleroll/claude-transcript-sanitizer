@@ -1,0 +1,12 @@
+# Per-directory override of the parent random_llm_projects/mise.toml.
+#
+# python = "3.12" here is documentation/secondary only — uv's own managed
+# interpreter (pinned via pyproject.toml's requires-python) is primary and
+# is what `uv sync`/`uv run` actually use. mise's own tool-version resolution
+# for a subdirectory with its own mise.toml was not verified to override the
+# parent's `python = "latest"` for arbitrary shells (e.g. a plain `python3`
+# invoked outside `uv run`); if precise mise-level pinning matters later,
+# confirm with `mise current python` from inside this directory.
+[tools]
+python = "3.12"
+gitleaks = "8.30.1"

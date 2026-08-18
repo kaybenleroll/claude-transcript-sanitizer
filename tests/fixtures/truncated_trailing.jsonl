@@ -1,0 +1,2 @@
+{"type":"user","uuid":"u1","sessionId":"s4","timestamp":"2026-08-18T00:00:00Z","cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"line one is fine"}]}}
+{"type":"user","uuid":"u2","sessionId":"s4","timestamp":"2026-08-18T00:00:01Z","cwd":"/tmp","message":{"role":"user","content":[{"type":"text","text":"mid-append trunc
