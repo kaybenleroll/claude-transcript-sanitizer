@@ -36,7 +36,7 @@ build-mirror:
 
 # gitleaks over the sanitized mirror — must exit 0 with zero findings (plan §5)
 gitleaks-mirror:
-    bash bin/gitleaks-gate.sh ../../.scratch/sanitized-mirror/projects
+    bash bin/gitleaks-gate.sh .scratch/sanitized-mirror/projects
 
 # ─── Classification & Ledger ──────────────────────────────────────────────────
 

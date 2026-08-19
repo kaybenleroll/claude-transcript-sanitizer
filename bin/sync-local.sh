@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REPO_ROOT="$(cd ../.. && pwd)"
+REPO_ROOT="$(pwd)"
 MIRROR="${MIRROR_DEST:-$REPO_ROOT/.scratch/sanitized-mirror/projects}"
 # claude-code-sync's CLAUDE_CODE_SYNC_CLAUDE_DIR is the ~/.claude equivalent
 # (it appends "projects" itself, see discovery.rs claude_projects_dir()) --

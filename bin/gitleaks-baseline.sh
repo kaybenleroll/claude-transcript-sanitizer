@@ -6,16 +6,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REPO_ROOT="$(cd ../.. && pwd)"
+REPO_ROOT="$(pwd)"
 TARGET="${1:-$HOME/.claude/projects}"
-REPORT="$REPO_ROOT/.scratch/gitleaks-baseline-raw.json"
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+REPORT="$REPO_ROOT/.scratch/gitleaks-baseline-raw-${TIMESTAMP}.json"
+LATEST_LINK="$REPO_ROOT/.scratch/gitleaks-baseline-raw-latest.json"
 
 mkdir -p "$(dirname "$REPORT")"
 
 mise exec -- gitleaks dir "$TARGET" --redact --no-banner \
+  --config .gitleaks.toml \
   --report-format json --report-path "$REPORT" --exit-code 0
 
+ln -sf "$(basename "$REPORT")" "$LATEST_LINK"
+
 echo "report: $REPORT"
+echo "latest symlink: $LATEST_LINK"
 echo "total findings: $(uv run python3 -c "import json; print(len(json.load(open('$REPORT'))))")"
 echo "by rule:"
 uv run python3 -c "

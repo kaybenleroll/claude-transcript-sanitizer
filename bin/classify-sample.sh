@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REPO_ROOT="$(cd ../.. && pwd)"
+REPO_ROOT="$(pwd)"
 MIRROR="${MIRROR_DEST:-$REPO_ROOT/.scratch/sanitized-mirror/projects}"
 OUT="${CLASSIFY_METRICS_OUT:-$REPO_ROOT/.scratch/classifier-sample-metrics.json}"
 

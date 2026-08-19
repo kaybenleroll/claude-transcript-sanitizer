@@ -146,3 +146,84 @@ def test_pem_marker_literal_redacted_across_split_leaves(engine):
     # a gitleaks-style scanner sees) must not reconstruct the marker text.
     concatenated = redacted_one + redacted_two
     assert "-----BEGIN RSA PRIVATE KEY-----" not in concatenated
+
+
+# ---------------------------------------------------------------------------
+# Escape-residue precedence (plan P0.1/P0.3): a shape-valid credential
+# preceded by a word character -- specifically literal backslash-escape
+# residue like `\n`/`\t` as captured from a shell command such as
+# `printf "a\nTOKEN"` -- must still be redacted. The old `\b`-anchored
+# patterns missed this class entirely; both gitleaks 8.30.1 and our own
+# recognizers shared the blind spot. Verified live: a mirror file retained
+# only 3 of 6 source occurrences of a probe token before this fix.
+# ---------------------------------------------------------------------------
+
+def test_aws_access_token_escape_residue_precedence(engine):
+    text = "echo hello\\nAKIAQ4ZKN7TG5XW2JLPD"
+    redacted, entity_types, _ = engine.redact(text, "broad")
+    assert "AKIAQ4ZKN7TG5XW2JLPD" not in redacted
+    assert "AWS_ACCESS_TOKEN" in entity_types
+
+
+def test_github_oauth_token_escape_residue_precedence(engine):
+    text = "printf 'x\\t'ghp_FAKE0123456789abcdefghijklmnopqrstuv"
+    redacted, entity_types, _ = engine.redact(text, "broad")
+    assert "ghp_FAKE0123456789abcdefghijklmnopqrstuv" not in redacted
+    assert "GITHUB_OAUTH_TOKEN" in entity_types
+
+
+def test_anthropic_api_key_escape_residue_precedence(engine):
+    text = "cmd\\nsk-ant-api03-FAKE0123456789abcdefghijklmnopqrstuvwxyzABCD"
+    redacted, entity_types, _ = engine.redact(text, "broad")
+    assert "sk-ant-api03-FAKE0123456789abcdefghijklmnopqrstuvwxyzABCD" not in redacted
+    assert "ANTHROPIC_API_KEY" in entity_types
+
+
+def test_openrouter_api_key_escape_residue_precedence(engine):
+    text = "cmd\\nsk-or-v1-FAKE0123456789abcdefghijklmnopqrstuvwxyzABCDEF"
+    redacted, entity_types, _ = engine.redact(text, "broad")
+    assert "sk-or-v1-FAKE0123456789abcdefghijklmnopqrstuvwxyzABCDEF" not in redacted
+    assert "OPENROUTER_API_KEY" in entity_types
+
+
+def test_gcp_api_key_escape_residue_precedence(engine):
+    text = "cmd\\nAIza" + "x" * 35
+    redacted, entity_types, _ = engine.redact(text, "broad")
+    assert ("AIza" + "x" * 35) not in redacted
+    assert "GCP_API_KEY" in entity_types
+
+
+def test_groq_api_key_escape_residue_precedence(engine):
+    text = "cmd\\ngsk_FAKE0123456789abcdefghijklmnopqrstuv"
+    redacted, entity_types, _ = engine.redact(text, "broad")
+    assert "gsk_FAKE0123456789abcdefghijklmnopqrstuv" not in redacted
+    assert "GROQ_API_KEY" in entity_types
+
+
+def test_stripe_access_token_escape_residue_precedence(engine):
+    text = "cmd\\nsk_test_FAKE0123456789abcdefghijklmnopqrstuv"
+    redacted, entity_types, _ = engine.redact(text, "broad")
+    assert "sk_test_FAKE0123456789abcdefghijklmnopqrstuv" not in redacted
+    assert "STRIPE_ACCESS_TOKEN" in entity_types
+
+
+def test_aws_access_token_genuine_word_char_prefix_not_matched(engine):
+    """Negative control: a REAL word char (not escape residue) immediately
+    preceding the AKIA/ASIA shape must NOT be treated as a boundary crossing
+    -- this is not a credential, it's a longer token that happens to contain
+    the AKIA shape as a substring."""
+    text = "XAKIAQ4ZKN7TG5XW2JLPD"
+    redacted, entity_types, _ = engine.redact(text, "broad")
+    assert redacted == text
+    assert "AWS_ACCESS_TOKEN" not in entity_types
+
+
+def test_aws_access_token_base32_blob_not_matched(engine):
+    """Negative control: AKIA appearing mid-string inside an unrelated
+    base32/uppercase-hex blob must NOT match -- the escape-aware boundary on
+    AKIA/ASIA is deliberately narrower than dropping `\\b` outright, unlike
+    the distinctive-prefix patterns."""
+    text = "MFRGGZDFMZTWQ2LKAKIAQ4ZKN7TG5XW2JLPDNBSWY3"
+    redacted, entity_types, _ = engine.redact(text, "broad")
+    assert redacted == text
+    assert "AWS_ACCESS_TOKEN" not in entity_types

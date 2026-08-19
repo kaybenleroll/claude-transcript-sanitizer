@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sanitize.cache import DEFAULT_CACHE_PATH, get as cache_get, hash_content, put as cache_put
+from sanitize.recognizers import CREDENTIAL_PREFIX_PATTERNS
 
 # ---------------------------------------------------------------------------
 # System prompt — lifted VERBATIM from ~/.claude-code-sync-repo/.git/hooks/
@@ -77,18 +78,14 @@ MAX_CHUNK_BYTES = 200_000
 CALL_TIMEOUT_SECONDS = 120
 MAX_ATTEMPTS = 3
 
-# Precise credential-prefix regexes, ported from the fixed-prefix recognizer
-# patterns in sanitize/recognizers.py (word-boundary + minimum-length gated,
-# not bare substring matching -- a bare `AKIA` or `gsk_` substring search
-# over-matches badly; verified against the real corpus, see module docstring).
+# Precise credential-prefix regex, built from the SAME PatternRecognizer
+# objects sanitize/recognizers.py registers with Presidio (not a hand-copy --
+# plan P0.2: the old verbatim copy here is how the \b-anchoring fix could
+# have landed in only one of the two call sites; not bare substring matching,
+# a bare `AKIA` or `gsk_` substring search over-matches badly; verified
+# against the real corpus, see module docstring).
 CREDENTIAL_PREFIX_RE = re.compile(
-    r"\bsk-ant-[A-Za-z0-9_-]{20,}\b"
-    r"|\bsk-or-[A-Za-z0-9_-]{20,}\b"
-    r"|\b(?:gho|ghp|ghs|ghu|ghr)_[A-Za-z0-9]{20,}\b"
-    r"|\bgsk_[A-Za-z0-9]{20,}\b"
-    r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"
-    r"|\bAIza[A-Za-z0-9_-]{35}\b"
-    r"|\b(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}\b"
+    "|".join(f"(?:{p})" for p in CREDENTIAL_PREFIX_PATTERNS)
 )
 
 

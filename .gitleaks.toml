@@ -1,0 +1,91 @@
+# Plan §P0.4 (~/.claude/plans/hidden-popping-crab.md): compensating control
+# for gitleaks 8.30.1's own `\b`-anchoring blind spot. gitleaks' built-in
+# rules anchor credential prefixes the same way sanitize/recognizers.py used
+# to (fixed in P0.1) -- a shape-valid token immediately preceded by a word
+# character (backslash-escape residue in a captured shell command, e.g.
+# `printf "a\nAKIA..."` stored with a LITERAL `\n`) is invisible to both the
+# unfixed recognizer AND gitleaks' default ruleset. We can fix our own
+# recognizers; we cannot patch gitleaks' compiled-in rules. This file adds
+# re-anchored copies of the same 8 credential shapes as extra rules.
+#
+# [extend] useDefault = true ADDS to gitleaks' built-in ruleset -- it does
+# NOT replace it (verified: gitleaks binary 8.30.1 embeds a config.Extend
+# struct with a UseDefault field; this is the documented mechanism, per
+# `gitleaks dir --help`'s --config precedence note and the upstream
+# config/gitleaks.toml [extend] convention). Confirmed empirically below:
+# `gitleaks dir <fixture> --config .gitleaks.toml` catches BOTH the custom
+# aws-access-token-reanchored rule on the escape-residue probe AND still
+# fires on ordinary default-ruleset shapes -- extend, never replace.
+#
+# gitleaks 8.30.1 compiles rule regex with Go's stdlib `regexp` (RE2), which
+# has NO lookahead/lookbehind support -- unlike sanitize/recognizers.py's
+# Python `re` patterns, these rules cannot reuse `(?!...)`/`(?<=...)`
+# directly. Two RE2-compatible adjustments from the Python source:
+#
+# 1. Trailing `(?![A-Za-z0-9_-])` assertions are dropped, not ported. They
+#    are redundant here: every prefix pattern below except AWS uses an
+#    unbounded-or-wide quantifier (`{20,}`, `{30,}`, `{10,99}`), which
+#    already matches greedily to the end of the character run with or
+#    without a following assertion. Detection (found/not-found) is what
+#    this gate needs, not exact match-span alignment with the recognizer.
+#
+# 2. AWS_ACCESS_TOKEN is the one pattern that needs BOTH a leading and a
+#    trailing boundary (AKIA/ASIA + exactly 16 chars, no unbounded
+#    quantifier to fall back on). Python's fix used an escape-aware
+#    lookbehind alternation, `(?:(?<=\[nrt])|(?<![A-Za-z0-9]))`. RE2 has no
+#    lookbehind, so the boundary chars are consumed INTO the match instead
+#    of asserted: `(?:^|[^A-Za-z0-9_]|\[nrt])` for the leading edge,
+#    `(?:[^A-Za-z0-9_]|$)` for the trailing edge. This shifts the reported
+#    match span by up to one character on either side but does not change
+#    whether the finding fires.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "anthropic-api-key-reanchored"
+description = "Anthropic API key (sk-ant-), re-anchored to catch escape-residue-preceded matches gitleaks' default anthropic-api-key rule misses"
+regex = '''sk-ant-[A-Za-z0-9_-]{20,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "openrouter-api-key-reanchored"
+description = "OpenRouter API key (sk-or-) -- no default gitleaks rule covers this prefix at all, custom-only"
+regex = '''sk-or-[A-Za-z0-9_-]{20,}'''
+keywords = ["sk-or-"]
+
+[[rules]]
+id = "github-oauth-token-reanchored"
+description = "GitHub OAuth/PAT token (gho_/ghp_/ghs_/ghu_/ghr_), re-anchored"
+regex = '''(?:gho|ghp|ghs|ghu|ghr)_[A-Za-z0-9]{20,}'''
+keywords = ["gho_", "ghp_", "ghs_", "ghu_", "ghr_"]
+
+[[rules]]
+id = "gcp-api-key-aiza-reanchored"
+description = "GCP API key (AIza prefix), re-anchored"
+regex = '''AIza[A-Za-z0-9_-]{35}'''
+keywords = ["aiza"]
+
+[[rules]]
+id = "gcp-api-key-aq-reanchored"
+description = "GCP API key (AQ. prefix), re-anchored"
+regex = '''AQ\.[A-Za-z0-9_-]{30,}'''
+keywords = ["aq."]
+
+[[rules]]
+id = "groq-api-key-reanchored"
+description = "Groq API key (gsk_ prefix), re-anchored"
+regex = '''gsk_[A-Za-z0-9]{20,}'''
+keywords = ["gsk_"]
+
+[[rules]]
+id = "aws-access-token-reanchored"
+description = "AWS access key ID (AKIA/ASIA), escape-aware leading boundary plus explicit trailing boundary -- RE2 has no lookaround, so both boundaries are consumed into the match instead of asserted"
+regex = '''(?:^|[^A-Za-z0-9_]|\\[nrt])(?:AKIA|ASIA)[A-Z0-9]{16}(?:[^A-Za-z0-9_]|$)'''
+keywords = ["akia", "asia"]
+
+[[rules]]
+id = "stripe-access-token-reanchored"
+description = "Stripe secret/restricted key (sk_/rk_ + test|live|prod), re-anchored -- matches gitleaks' own stripe-access-token shape, widened per recognizers.py's documented deviation (test tokens included, not just live)"
+regex = '''(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}'''
+keywords = ["sk_test_", "sk_live_", "sk_prod_", "rk_test_", "rk_live_", "rk_prod_"]

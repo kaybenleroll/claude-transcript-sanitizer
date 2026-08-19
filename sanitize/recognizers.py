@@ -63,7 +63,7 @@ ANTHROPIC_API_KEY = PatternRecognizer(
     name="AnthropicApiKeyRecognizer",
     supported_language="en",
     patterns=[
-        Pattern("anthropic-api-key", r"\bsk-ant-[A-Za-z0-9_-]{20,}\b", 0.9),
+        Pattern("anthropic-api-key", r"sk-ant-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])", 0.9),
     ],
 )
 
@@ -77,7 +77,7 @@ OPENROUTER_API_KEY = PatternRecognizer(
     name="OpenRouterApiKeyRecognizer",
     supported_language="en",
     patterns=[
-        Pattern("openrouter-api-key", r"\bsk-or-[A-Za-z0-9_-]{20,}\b", 0.85),
+        Pattern("openrouter-api-key", r"sk-or-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])", 0.85),
     ],
 )
 
@@ -86,7 +86,7 @@ GITHUB_OAUTH_TOKEN = PatternRecognizer(
     name="GithubOauthTokenRecognizer",
     supported_language="en",
     patterns=[
-        Pattern("github-oauth", r"\b(?:gho|ghp|ghs|ghu|ghr)_[A-Za-z0-9]{20,}\b", 0.9),
+        Pattern("github-oauth", r"(?:gho|ghp|ghs|ghu|ghr)_[A-Za-z0-9]{20,}(?![A-Za-z0-9_-])", 0.9),
     ],
 )
 
@@ -95,8 +95,8 @@ GCP_API_KEY = PatternRecognizer(
     name="GcpApiKeyRecognizer",
     supported_language="en",
     patterns=[
-        Pattern("gcp-api-key-aiza", r"\bAIza[A-Za-z0-9_-]{35}\b", 0.9),
-        Pattern("gcp-api-key-aq", r"\bAQ\.[A-Za-z0-9_-]{30,}\b", 0.8),
+        Pattern("gcp-api-key-aiza", r"AIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])", 0.9),
+        Pattern("gcp-api-key-aq", r"AQ\.[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])", 0.8),
     ],
 )
 
@@ -105,7 +105,7 @@ GROQ_API_KEY = PatternRecognizer(
     name="GroqApiKeyRecognizer",
     supported_language="en",
     patterns=[
-        Pattern("groq-api-key", r"\bgsk_[A-Za-z0-9]{20,}\b", 0.9),
+        Pattern("groq-api-key", r"gsk_[A-Za-z0-9]{20,}(?![A-Za-z0-9_-])", 0.9),
     ],
 )
 
@@ -168,7 +168,11 @@ AWS_ACCESS_TOKEN = PatternRecognizer(
     name="AwsAccessTokenRecognizer",
     supported_language="en",
     patterns=[
-        Pattern("aws-access-token", r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", 0.9),
+        Pattern(
+            "aws-access-token",
+            r"(?:(?<=\\[nrt])|(?<![A-Za-z0-9_]))(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_])",
+            0.9,
+        ),
     ],
 )
 
@@ -188,7 +192,11 @@ STRIPE_ACCESS_TOKEN = PatternRecognizer(
         # workaround — so this recognizer now matches what gitleaks matches,
         # superseding the "safe by design" note as a documented deviation
         # (flagged in this phase's report, not silently decided).
-        Pattern("stripe-access-token", r"\b(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}\b", 0.9),
+        Pattern(
+            "stripe-access-token",
+            r"(?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,99}(?![A-Za-z0-9_-])",
+            0.9,
+        ),
     ],
 )
 
@@ -268,6 +276,24 @@ def build_recognizers() -> list[PatternRecognizer]:
         AZURE_AD_CLIENT_SECRET,
         ENV_ASSIGNMENT,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Single source of truth for classify.py's CREDENTIAL_PREFIX_RE (plan P0.2).
+# classify.py used to hand-copy 7 of these regex strings verbatim, which is
+# how the \b-anchoring bug in recognizers.py went un-fixed in one of its two
+# call sites. Sourced directly from the same PatternRecognizer objects Presidio
+# uses, so a future recognizer fix can only land here once.
+# ---------------------------------------------------------------------------
+CREDENTIAL_PREFIX_PATTERNS: list[str] = [
+    ANTHROPIC_API_KEY.patterns[0].regex,
+    OPENROUTER_API_KEY.patterns[0].regex,
+    GITHUB_OAUTH_TOKEN.patterns[0].regex,
+    GROQ_API_KEY.patterns[0].regex,
+    AWS_ACCESS_TOKEN.patterns[0].regex,
+    GCP_API_KEY.patterns[0].regex,  # AIza only -- classify.py never used AQ.
+    STRIPE_ACCESS_TOKEN.patterns[0].regex,
+]
 
 
 CREDENTIAL_ENTITY_TYPES = [

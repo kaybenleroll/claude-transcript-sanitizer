@@ -102,6 +102,23 @@ def test_find_credential_relpaths_no_false_positive_on_bare_substring(tmp_path):
     assert found == set()
 
 
+def test_find_credential_relpaths_matches_escape_residue_precedence(tmp_path):
+    """Plan P0.2/P0.3: raw .jsonl bytes can carry literal `\\n`/`\\t` escape
+    residue (e.g. from a captured `printf "a\\nTOKEN"` shell command) with a
+    real word char immediately before the token shape. The old
+    `\\b`-anchored CREDENTIAL_PREFIX_RE missed this, silently dropping the
+    whole file from LLM classification. Written as raw bytes directly (not
+    via json.dumps, which would add its own backslash-escaping layer on top)
+    so the fixture's on-disk bytes match exactly what a raw-byte scan sees."""
+    source = tmp_path / "source"
+    source.mkdir(parents=True)
+    (source / "escaped.jsonl").write_bytes(
+        b'{"message": {"content": "echo hello\\nAKIAQ4ZKN7TG5XW2JLPD"}}\n'
+    )
+    found = find_credential_relpaths(source)
+    assert found == {"escaped.jsonl"}
+
+
 def test_select_sample_includes_credential_files_and_contrast(tmp_path):
     source = tmp_path / "source"
     mirror = tmp_path / "mirror"

@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REPO_ROOT="$(cd ../.. && pwd)"
+REPO_ROOT="$(pwd)"
 TARGET="${1:?usage: gitleaks-gate.sh <target-dir> [run-id]}"
 RUN_ID="${2:-$(date -u +%Y%m%dT%H%M%SZ)}"
 STATE_DIR="${SANITIZER_STATE_DIR:-$HOME/.local/state/claude-transcript-sanitizer}"

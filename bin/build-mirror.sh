@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REPO_ROOT="$(cd ../.. && pwd)"
+REPO_ROOT="$(pwd)"
 DEST="${MIRROR_DEST:-$REPO_ROOT/.scratch/sanitized-mirror/projects}"
 RUN_DIR="${MIRROR_RUN_DIR:-$REPO_ROOT/.scratch/mirror-runs}"
 
