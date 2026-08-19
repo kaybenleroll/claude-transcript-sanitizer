@@ -105,6 +105,52 @@ def test_truncated_trailing_line_omitted_with_tolerate_flag(engine, tmp_path):
     assert "mid-append trunc" not in dst.read_text(encoding="utf-8")
 
 
+def test_unicode_line_separators_inside_string_do_not_misdetect_malformed(engine, tmp_path):
+    """A JSONL line whose string value legitimately contains a raw U+2028
+    (LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR) is valid JSON as-is --
+    only U+0000-U+001F strictly require escaping inside a JSON string, and
+    \\u2028/\\u2029 fall outside that range. str.splitlines() treats these
+    (and \\v, \\f, \\x1c-\\x1e, \\x85) as line boundaries even though JSON
+    does not, which fragments the line and raises a spurious
+    MalformedLineError. Confirm the pre-fix behaviour would misdetect this,
+    then confirm post-fix redact_jsonl_file() processes it cleanly."""
+    text_with_seps = "line one line two line three"
+    record = {
+        "uuid": "u1",
+        "type": "user",
+        "message": {"content": [{"type": "text", "text": text_with_seps}]},
+    }
+    raw_line = json.dumps(record, ensure_ascii=False)
+
+    # Sanity: this is valid JSON containing the raw separators unescaped.
+    reparsed = json.loads(raw_line)
+    assert reparsed["message"]["content"][0]["text"] == text_with_seps
+
+    # Pre-fix diagnosis: str.splitlines() on this single JSONL line would
+    # fragment it into multiple pieces, each of which is not valid JSON on
+    # its own -- proving the old splitlines()-based boundary detection would
+    # have misdetected this as malformed.
+    fragments = raw_line.splitlines()
+    assert len(fragments) > 1
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(fragments[0])
+
+    src = tmp_path / "unicode_seps.jsonl"
+    src.write_text(raw_line + "\n", encoding="utf-8")
+    dst = tmp_path / "unicode_seps.out.jsonl"
+    stats = RedactionStats()
+
+    # Post-fix: must not raise, and must preserve a single output line whose
+    # text still contains the raw separators.
+    redact_jsonl_file(src, dst, engine, stats)
+    out_lines = [line for line in dst.read_text(encoding="utf-8").split("\n") if line != ""]
+    assert len(out_lines) == 1
+    out_obj = json.loads(out_lines[0])
+    out_text = out_obj["message"]["content"][0]["text"]
+    assert " " in out_text
+    assert " " in out_text
+
+
 def test_write_target_refused_under_claude_projects(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     (fake_home / ".claude" / "projects" / "proj1").mkdir(parents=True)

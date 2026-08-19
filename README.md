@@ -114,6 +114,77 @@ Credential redaction for Claude Code session transcripts
   acceptance gate — stricter than gate 4, which only checks the mirror
   input).
 
+**§9 (.txt sidecar sync) — added this phase:**
+
+- Why: Claude Code writes a `.txt` sidecar whenever a tool's output exceeds
+  an internal size threshold, and when it does, the `.jsonl` gets a
+  truncation banner plus a 2 KB preview *instead of* the full content — so
+  every existing `.txt` sidecar holds real content that's absent from the
+  `.jsonl`. §1-§8 synced only `.jsonl`; this phase brings `.txt` into the
+  mirror alongside it.
+- `sanitize/text.py` — `redact_text_file()`: 8 MiB oversize cap specific to
+  `.txt` (never touches the `.jsonl` cap), strict UTF-8 decode (no
+  `errors="replace"` — a leak vector that could split a credential across a
+  replacement char), whole-file (unchunked) redaction under a new
+  `"broad_pii"` profile (`CREDENTIAL_ENTITY_TYPES + EMAIL_ADDRESS +
+  IP_ADDRESS`, no `PHONE_NUMBER` — the sole false-positive source measured
+  on a real sample), and a bounded-match-span sanity check
+  (`AnomalousRedactionSpanError`) against the unbounded
+  `PRIVATE_KEY_BLOCK` pattern now matching whole-file instead of per-JSON-leaf.
+- `sanitize/engine.py` — `redact()` gained a third return value (source-text
+  match spans) to support the span check above; all existing call sites
+  updated for 3-tuple unpacking.
+- `sanitize/mirror.py` — `build_mirror()` now dispatches on suffix
+  (`.jsonl`/`.txt`), with a mirror hygiene gate (stale-`.tmp` sweep, prune
+  keyed on the successfully-processed set, suffix whitelist) run at the end.
+- `bin/sync-local.sh` — new Gates B2 (committed-path + count-parity
+  check), B3 (sha256 mirror-vs-committed), B4 (reads `summary.json`'s
+  `skip_ceiling_exceeded`), plus a duplicated sync-side hygiene pre-flight
+  as defense-in-depth against a stray `.tmp` from a prior crashed build.
+- **`use_project_name_only` is deliberately `false` in this phase's
+  `bin/sync-local.sh`-generated config — not production's `true`.** This
+  key gates both session *and* attachment top-level directory naming in
+  `claude-code-sync`: under `false` (used here) the top-level directory is
+  the physical source project directory, so a session and its `.txt`
+  sidecars always land under the same top-level directory; under `true`
+  (production) it's derived per-file from that file's own recorded `cwd`,
+  which can split one physical source directory's files across several
+  top-level directories (observed: a 4-way split in one sampled real case).
+  Production publish — pointing this pipeline at a live corpus for a real
+  push — remains future work, not implemented by this phase (see Deferred,
+  below).
+- For the extensive prior stress-testing and design exploration behind
+  these decisions (the `use_project_name_only` path-divergence problem in
+  particular), see the historical, superseded plan at
+  `~/.claude/plans/velvet-kindling-muffin.md` — this final, condensed plan
+  (`~/.claude/plans/resilient-knitting-teapot.md`) replaced it once the
+  remaining hard questions were settled by running real code against two
+  isolated `claude-code-sync` spikes rather than further prose review.
+- `tests/test_text.py`, `tests/test_mirror.py` (new coverage), updates to
+  `tests/test_recognizers.py`/`tests/test_engine.py` for the 3-tuple
+  `redact()` return.
+
+**Deferred (not this phase):**
+
+- Production publish path: pinning `CLAUDE_CODE_SYNC_CLAUDE_DIR` to a live,
+  freshly-built mirror for a real push. Neither §1-§8 nor §9 stands this up.
+- `use_project_name_only = true`'s production-side path-divergence and
+  collision problem (5 groups / 13 directories collide under `true` in one
+  sampled real case) — needs its own design pass before deciding a direction.
+- No unchanged-file skip-cache — `build_mirror()` re-redacts everything
+  every run; `cache.py`'s `hash_content` is reusable and already wired into
+  the §7 classifier, but nothing wires it into the mirror build.
+- `narrow`-profile `PHONE_NUMBER` false positives possibly already present
+  in shipped `.jsonl` output — a separate verification pass, out of scope
+  here.
+- Unsanitized-source attachment risk: if a real production push ever points
+  `CLAUDE_CODE_SYNC_CLAUDE_DIR` at a raw source tree rather than a built
+  sanitized mirror, `.meta.json`/`memory/*.md`/other attachment classes
+  would be committed unredacted under `exclude_attachments = false`
+  (confirmed present in a real source tree census). This phase's mirror
+  structurally can't contain them, but any future production-publish design
+  must not assume that property carries over.
+
 ## Real-corpus results (2026-08-18)
 
 - **Gitleaks baseline** (raw corpus, measurement only): 254 findings (was

@@ -90,16 +90,22 @@ class RedactionEngine:
             return CREDENTIAL_ENTITY_TYPES + NARROW_EXTRA_ENTITIES
         if profile == "broad":
             return CREDENTIAL_ENTITY_TYPES + BROAD_EXTRA_ENTITIES
+        if profile == "broad_pii":
+            return CREDENTIAL_ENTITY_TYPES + ["EMAIL_ADDRESS", "IP_ADDRESS"]
         raise ValueError(f"unknown profile: {profile!r}")
 
-    def redact(self, text: str, profile: str) -> tuple[str, list[str]]:
-        """Redact `text` under `profile`. Returns (redacted_text, entity_types_found).
+    def redact(self, text: str, profile: str) -> tuple[str, list[str], list[tuple[int, int]]]:
+        """Redact `text` under `profile`. Returns (redacted_text, entity_types_found, spans).
 
         entity_types_found lists RecognizerResult.entity_type for each match
         (for the redaction-log entity-type counts — never the matched value).
+        spans lists the (start, end) match span of each finding in the
+        *source* text (aligned 1:1 with entity_types_found), read from the
+        same analyzer.analyze() results used to anonymize — analyze() is not
+        re-run.
         """
         if not text:
-            return text, []
+            return text, [], []
 
         entities = self.entities_for_profile(profile)
         # allow_list / allow_list_match="exact" reinforces idempotency: a
@@ -116,7 +122,7 @@ class RedactionEngine:
             allow_list_match="exact",
         )
         if not results:
-            return text, []
+            return text, [], []
 
         anonymized = self.anonymizer.anonymize(
             text=text,
@@ -124,7 +130,8 @@ class RedactionEngine:
             operators={r.entity_type: _operator_config_for(r.entity_type) for r in results},
         )
         entity_types = [r.entity_type for r in results]
-        return anonymized.text, entity_types
+        spans = [(r.start, r.end) for r in results]
+        return anonymized.text, entity_types, spans
 
 
 def is_idempotent_placeholder(text: str) -> bool:

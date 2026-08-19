@@ -62,13 +62,31 @@ EXPECTED_SESSIONS=$((MIRROR_JSONL_COUNT - MIRROR_OVERSIZE_COUNT))
 echo "mirror files >= ${MAX_FILE_SIZE_BYTES} bytes: $MIRROR_OVERSIZE_COUNT"
 echo "expected discovered sessions (pre-push estimate, before warn-drops known): $EXPECTED_SESSIONS"
 
+# --- Pre-flight: re-run the mirror hygiene gate (suffix whitelist + .tmp
+# sweep -- same logic as sanitize/mirror.py's build-side gate) against
+# $MIRROR, regardless of whether `just build-mirror` ran cleanly in this
+# invocation. Prune (mechanism 2, keyed on a run's processed-set) is
+# build-side only -- sync-local.sh has no processed-set of its own, so this
+# duplicate only covers mechanisms 1 and 3. (plan §9, commit step 7) ---
+echo "pre-flight: mirror hygiene gate (suffix whitelist + .tmp sweep) against $MIRROR..."
+find "$MIRROR" -type f -name '*.tmp' -print -delete
+HYGIENE_FOREIGN="$(find "$MIRROR" -type f ! -name '*.jsonl' ! -name '*.txt')"
+if [ -n "$HYGIENE_FOREIGN" ]; then
+  echo "ERROR: foreign file(s) found in mirror (not .jsonl/.txt) after .tmp sweep:" >&2
+  echo "$HYGIENE_FOREIGN" >&2
+  exit 1
+fi
+echo "pre-flight: hygiene OK (no foreign-suffix files, no stray .tmp residue)"
+
 # --- Fresh throwaway state each run (dry run semantics: clean slate). ---
 rm -rf "$THROWAWAY_REPO" "$CCS_CONFIG_DIR"
 mkdir -p "$CCS_CONFIG_DIR"
 
 cat > "$INIT_TOML" <<EOF
 repo_path = "$THROWAWAY_REPO"
-exclude_attachments = true
+exclude_attachments = false
+use_project_name_only = false
+sync_subdirectory = "projects"
 EOF
 
 echo "validating init.toml parses..."
@@ -91,6 +109,40 @@ if [ ! -f "$CONFIG_TOML" ]; then
   echo "ERROR: expected config.toml at $CONFIG_TOML after init, not found." >&2
   exit 1
 fi
+
+# --- .gitignore defense-in-depth (plan §9, commit step 7).
+#
+# DEVIATION FROM THE PLAN'S STATED MECHANISM, discovered empirically against
+# the real claude-code-sync 0.3.3 source (src/artifacts/engine.rs,
+# src/sync/push.rs): the plan assumed `.gitignore` exists after `init`, to be
+# edited "after init, before push". In fact `claude-code-sync init` never
+# touches `.gitignore` at all -- it's `push` that writes it, via
+# ensure_ignore_files(), called *and* followed by `repo.commit(...)` inside
+# one atomic `push` invocation (push.rs:261 write, :361 commit; no CLI hook
+# point exists between them, and init+push were already split into two
+# invocations per this script's header comment, so there is no third
+# invocation to insert here). Editing the file "after init, before push" as
+# a literal third step is therefore impossible with this tool version.
+#
+# ensure_ignore_files() *is* explicitly marker-aware and content-preserving
+# (engine.rs: "Idempotent; preserves user content outside the block"): if
+# the file already has non-empty content without the marker pair, it appends
+# its own managed block *after* that content, unchanged. So instead of
+# editing the file after push writes it (too late -- already committed by
+# then), pre-create it right after init (once $THROWAWAY_REPO/.git exists)
+# with our line as the file's entire pre-existing content; push's own
+# ensure_ignore_files() call then appends its managed block below it,
+# leaving our line outside (above) the block, exactly satisfying "outside
+# the tool's managed block" -- verified against the real markers below
+# (real generated block: "# >>> claude-code-sync managed block — do not
+# edit inside" / "# <<< claude-code-sync managed block", confirmed from a
+# prior real run's committed .gitignore). ---
+if [ ! -d "$THROWAWAY_REPO/.git" ]; then
+  echo "ERROR: expected $THROWAWAY_REPO/.git to exist after init, not found." >&2
+  exit 1
+fi
+echo '*.tmp' > "$THROWAWAY_REPO/.gitignore"
+echo "pre-seeded $THROWAWAY_REPO/.gitignore with '*.tmp' before push (push's ensure_ignore_files() appends its managed block after this line, preserving it outside the block)"
 
 echo "step 2/3: patching max_file_size_bytes=$MAX_FILE_SIZE_BYTES into $CONFIG_TOML..."
 uv run python3 -c "
@@ -175,16 +227,114 @@ if [ ! -d "$THROWAWAY_REPO/.git" ]; then
   echo "FAIL: no git repo at $THROWAWAY_REPO after push." >&2
   exit 1
 fi
-COMMITTED_FILE_COUNT="$(git -C "$THROWAWAY_REPO" show --stat --format='' HEAD | grep -cE '\| ' || true)"
-COMMITTED_JSONL_COUNT="$(git -C "$THROWAWAY_REPO" show --stat --format='' HEAD | grep -cE '\.jsonl\s*\| ' || true)"
-echo "committed file count (git show --stat, HEAD, all files incl. tool-written .gitignore): $COMMITTED_FILE_COUNT"
-echo "committed .jsonl file count (git show --stat, HEAD): $COMMITTED_JSONL_COUNT"
+COMMITTED_FILE_COUNT="$(git -C "$THROWAWAY_REPO" ls-tree -r --name-only HEAD | wc -l | tr -d ' ')"
+COMMITTED_JSONL_COUNT="$(git -C "$THROWAWAY_REPO" ls-tree -r --name-only HEAD | grep -cE '\.jsonl$' || true)"
+echo "committed file count (git ls-tree -r --name-only, HEAD, all files incl. tool-written .gitignore): $COMMITTED_FILE_COUNT"
+echo "committed .jsonl file count (git ls-tree -r --name-only, HEAD): $COMMITTED_JSONL_COUNT"
 if [ "$COMMITTED_JSONL_COUNT" -eq "$DISCOVERED_SESSIONS" ]; then
   echo "PASS: committed .jsonl count matches tool-discovered session count (staging did not silently diverge)."
   STAGE_STATUS=0
 else
   echo "FAIL: committed .jsonl count ($COMMITTED_JSONL_COUNT) != discovered sessions ($DISCOVERED_SESSIONS) -- staging (git add -A) diverged from the tool's reported intent (check for a .gitignore match)." >&2
   STAGE_STATUS=1
+fi
+
+# --- Gate B2 (plan §9, commit step 7): every mirror .txt committed at
+# "projects/" + mirror_relpath, plus count parity. Open question (a) --
+# auto-mode-classifier-error.txt, the one sidecar shallower than
+# tool-results/ -- is exercised here for the first time by the real corpus
+# (no special-casing needed if the "projects/" + relpath identity holds
+# generally, which it does per-file below). Open question (b) -- no
+# drop-count term: the real corpus has exactly one project with zero valid
+# sessions (~/.claude/projects/.scratch/, dropped by Gate A's WARN path),
+# and it has zero .txt attachments, so there is no real case to adjust for;
+# left as simple count-equality. ---
+echo "Gate B2: mirror .txt <-> committed path + count parity..."
+COMMITTED_LIST_FILE="$REPO_ROOT/.scratch/sync-local-committed-tree-${RUN_ID}.txt"
+git -C "$THROWAWAY_REPO" ls-tree -r --name-only HEAD > "$COMMITTED_LIST_FILE"
+COMMITTED_TXT_COUNT="$(grep -cE '\.txt$' "$COMMITTED_LIST_FILE" || true)"
+MIRROR_TXT_COUNT="$(find "$MIRROR" -name '*.txt' -type f | wc -l | tr -d ' ')"
+echo "mirror .txt files: $MIRROR_TXT_COUNT"
+echo "committed .txt files: $COMMITTED_TXT_COUNT"
+
+GATE_B2_STATUS=0
+if [ "$MIRROR_TXT_COUNT" -ne "$COMMITTED_TXT_COUNT" ]; then
+  echo "FAIL: Gate B2 count mismatch -- mirror .txt ($MIRROR_TXT_COUNT) != committed .txt ($COMMITTED_TXT_COUNT)" >&2
+  GATE_B2_STATUS=1
+fi
+
+MISSING_TXT_FILE="$REPO_ROOT/.scratch/sync-local-gate-b2-missing-${RUN_ID}.txt"
+: > "$MISSING_TXT_FILE"
+while IFS= read -r f; do
+  rel="${f#"$MIRROR"/}"
+  expected="projects/$rel"
+  if ! grep -qxF "$expected" "$COMMITTED_LIST_FILE"; then
+    echo "$expected" >> "$MISSING_TXT_FILE"
+  fi
+done < <(find "$MIRROR" -name '*.txt' -type f)
+if [ -s "$MISSING_TXT_FILE" ]; then
+  echo "FAIL: Gate B2 -- mirror .txt file(s) missing from committed tree at their expected path:" >&2
+  cat "$MISSING_TXT_FILE" >&2
+  GATE_B2_STATUS=1
+fi
+if [ "$GATE_B2_STATUS" -eq 0 ]; then
+  echo "PASS: Gate B2 (mirror .txt <-> committed path + count parity)"
+fi
+
+# --- Gate B3 (plan §9, commit step 7): sha256 each mirror .txt against its
+# committed counterpart on disk (the throwaway repo is a normal, non-bare
+# working tree -- committed files remain present at "projects/" + relpath
+# after `claude-code-sync push` commits them). ---
+echo "Gate B3: sha256 mirror .txt vs committed counterpart..."
+GATE_B3_STATUS=0
+MISMATCH_TXT_FILE="$REPO_ROOT/.scratch/sync-local-gate-b3-mismatch-${RUN_ID}.txt"
+: > "$MISMATCH_TXT_FILE"
+while IFS= read -r f; do
+  rel="${f#"$MIRROR"/}"
+  committed_path="$THROWAWAY_REPO/projects/$rel"
+  if [ ! -f "$committed_path" ]; then
+    echo "$rel (committed file missing on disk at $committed_path)" >> "$MISMATCH_TXT_FILE"
+    continue
+  fi
+  mirror_hash="$(sha256sum "$f" | cut -d' ' -f1)"
+  committed_hash="$(sha256sum "$committed_path" | cut -d' ' -f1)"
+  if [ "$mirror_hash" != "$committed_hash" ]; then
+    echo "$rel (mirror=$mirror_hash committed=$committed_hash)" >> "$MISMATCH_TXT_FILE"
+  fi
+done < <(find "$MIRROR" -name '*.txt' -type f)
+if [ -s "$MISMATCH_TXT_FILE" ]; then
+  echo "FAIL: Gate B3 -- sha256 mismatch(es) between mirror and committed .txt:" >&2
+  cat "$MISMATCH_TXT_FILE" >&2
+  GATE_B3_STATUS=1
+else
+  echo "PASS: Gate B3 (sha256 identity, mirror vs committed, all .txt)"
+fi
+
+# --- Gate B4 (plan §9, commit step 7): read skip_ceiling_exceeded from the
+# fixed-path summary.json ($MIRROR/../summary.json, written by
+# sanitize/mirror.py's run_build()/_main()) -- never invoke build-mirror or
+# read its exit code from here. Fails closed if the file is missing. ---
+echo "Gate B4: skip_ceiling_exceeded check (fixed-path summary.json)..."
+FIXED_SUMMARY="$(dirname "$MIRROR")/summary.json"
+GATE_B4_STATUS=0
+if [ ! -f "$FIXED_SUMMARY" ]; then
+  echo "FAIL: Gate B4 -- fixed-path summary.json not found at $FIXED_SUMMARY (run 'just build-mirror' first)." >&2
+  GATE_B4_STATUS=1
+else
+  SKIP_CEILING_EXCEEDED="$(uv run python3 -c "
+import json
+with open('$FIXED_SUMMARY') as f:
+    d = json.load(f)
+print(d.get('skip_ceiling_exceeded'))
+")"
+  echo "skip_ceiling_exceeded: $SKIP_CEILING_EXCEEDED"
+  if [ "$SKIP_CEILING_EXCEEDED" != "False" ]; then
+    echo "FAIL: Gate B4 -- skip_ceiling_exceeded is not False ($SKIP_CEILING_EXCEEDED, or field missing)." >&2
+    GATE_B4_STATUS=1
+  fi
+fi
+if [ "$GATE_B4_STATUS" -eq 0 ]; then
+  echo "PASS: Gate B4 (skip_ceiling_exceeded == False)"
 fi
 
 # --- Acceptance check 3 (gate 7): gitleaks over the committed, re-serialized tree. ---
@@ -214,17 +364,24 @@ print(f'  TOTAL: {len(findings)}')
 fi
 
 echo
-echo "=== §8 sync-local summary ==="
+echo "=== §9 sync-local summary ==="
 echo "mirror .jsonl files:          $MIRROR_JSONL_COUNT"
+echo "mirror .txt files:            $MIRROR_TXT_COUNT"
 echo "oversize (>= ${MAX_FILE_SIZE_BYTES}B): $MIRROR_OVERSIZE_COUNT"
 echo "discovered sessions:          $DISCOVERED_SESSIONS (expected $EXPECTED_SESSIONS)"
 echo "committed files (total):      $COMMITTED_FILE_COUNT"
 echo "committed .jsonl files:       $COMMITTED_JSONL_COUNT"
-echo "session-count guard:          $([ "$GUARD_STATUS" -eq 0 ] && echo PASS || echo FAIL)"
-echo "staged-vs-reported guard:     $([ "$STAGE_STATUS" -eq 0 ] && echo PASS || echo FAIL)"
-echo "gitleaks-on-committed-tree:   $([ "$GITLEAKS_STATUS" -eq 0 ] && echo PASS || echo FAIL)"
+echo "committed .txt files:         $COMMITTED_TXT_COUNT"
+echo "hygiene pre-flight:           PASS (script would already have exited 1 above otherwise)"
+echo "Gate A (session-count guard): $([ "$GUARD_STATUS" -eq 0 ] && echo PASS || echo FAIL)"
+echo "Gate B (staged-vs-reported):  $([ "$STAGE_STATUS" -eq 0 ] && echo PASS || echo FAIL)"
+echo "Gate B2 (txt path+count):     $([ "$GATE_B2_STATUS" -eq 0 ] && echo PASS || echo FAIL)"
+echo "Gate B3 (txt sha256 parity):  $([ "$GATE_B3_STATUS" -eq 0 ] && echo PASS || echo FAIL)"
+echo "Gate B4 (skip_ceiling_exceeded): $([ "$GATE_B4_STATUS" -eq 0 ] && echo PASS || echo FAIL)"
+echo "Gate C (gitleaks committed):  $([ "$GITLEAKS_STATUS" -eq 0 ] && echo PASS || echo FAIL)"
 
-if [ "$GUARD_STATUS" -ne 0 ] || [ "$STAGE_STATUS" -ne 0 ] || [ "$GITLEAKS_STATUS" -ne 0 ]; then
+if [ "$GUARD_STATUS" -ne 0 ] || [ "$STAGE_STATUS" -ne 0 ] || [ "$GATE_B2_STATUS" -ne 0 ] \
+   || [ "$GATE_B3_STATUS" -ne 0 ] || [ "$GATE_B4_STATUS" -ne 0 ] || [ "$GITLEAKS_STATUS" -ne 0 ]; then
   exit 1
 fi
 exit 0

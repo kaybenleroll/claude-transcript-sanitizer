@@ -107,7 +107,7 @@ def redact_value(value, path: tuple, engine: RedactionEngine, stats: RedactionSt
         return [redact_value(v, path + (i,), engine, stats) for i, v in enumerate(value)]
     if isinstance(value, str):
         profile = "narrow" if _path_matches_narrow(path) else "broad"
-        redacted, entity_types = engine.redact(value, profile)
+        redacted, entity_types, _ = engine.redact(value, profile)
         if entity_types:
             stats.add(entity_types)
         return redacted
@@ -153,7 +153,16 @@ def redact_jsonl_file(
     """
     raw_text = src_path.read_text(encoding="utf-8")
     had_trailing_newline = raw_text.endswith("\n")
-    src_lines = raw_text.splitlines()
+    # Split strictly on LF ("\n") only -- NOT str.splitlines(), which also
+    # splits on \v, \f, \x1c-\x1e, \x85 (NEL), U+2028, and U+2029. None of
+    # those require escaping inside a JSON string (only U+0000-U+001F
+    # strictly do, and \x85/U+2028/U+2029 fall outside that range), so a
+    # legitimate JSON string value containing one of them would otherwise be
+    # spuriously fragmented into a "malformed" line. Chop a single trailing
+    # "\n" first (if present) so the resulting list matches what
+    # splitlines() would have produced for LF-only content -- i.e. no
+    # synthetic trailing "" element from the final newline.
+    src_lines = (raw_text[:-1] if had_trailing_newline else raw_text).split("\n")
 
     out_lines: list[str] = []
     for i, raw_line in enumerate(src_lines):
