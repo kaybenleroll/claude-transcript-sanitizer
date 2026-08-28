@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# hooks/pre-commit — Phase A (issue #48): Stage 0 (lock/reentrancy) +
+# Stage 1 (gitleaks, ported verbatim from the live untracked hook at
+# ~/.claude-code-sync-repo/.git/hooks/pre-commit's Stage 1).
+#
+# Stage 2 (classify.py business-sensitivity review) is explicitly deferred
+# to Phase B — see ~/.claude/plans/joyful-noodling-heron.md. Not built, not
+# stubbed here beyond a placeholder that always passes.
+#
+# --- Installation (path-resolution mechanism, decided in Phase A) ---
+# A git hook always runs with cwd at the *invoking* repo's toplevel, never
+# this repo's — so the `cd "$(dirname "$0")/.."` pattern used by every
+# other bin/*.sh script in this repo does not work here.
+#
+# Install this file as a SYMLINK, not a copy:
+#   ln -s /path/to/claude_transcript_sanitizer/hooks/pre-commit \
+#         <target-repo>/.git/hooks/pre-commit
+#
+# `readlink -f "${BASH_SOURCE[0]}"` resolves back through the symlink to
+# this file's real path in claude_transcript_sanitizer regardless of which
+# repo invoked it, and bin/lib/lock.sh is located relative to that
+# resolved path. A plain copy breaks this — readlink -f on a copy just
+# returns the copy's own (foreign-repo) path, and lock.sh would not be
+# found. If a copy-based install is ever wanted instead, it must bake an
+# absolute SANITIZER_REPO_ROOT into the copy at install time; that is not
+# implemented here.
+set -euo pipefail
+
+HOOK_SRC="$(readlink -f "${BASH_SOURCE[0]}")"
+SANITIZER_REPO_ROOT="$(dirname "$(dirname "$HOOK_SRC")")"
+
+if [[ ! -f "$SANITIZER_REPO_ROOT/bin/lib/lock.sh" ]]; then
+  echo "BLOCKED: cannot resolve bin/lib/lock.sh from hook path $HOOK_SRC" >&2
+  echo "(this hook must be installed as a symlink to claude_transcript_sanitizer/hooks/pre-commit, not a copy)" >&2
+  exit 1
+fi
+
+if [[ ! -f "$SANITIZER_REPO_ROOT/.gitleaks.toml" ]]; then
+  echo "BLOCKED: cannot resolve .gitleaks.toml from hook path $HOOK_SRC" >&2
+  echo "(this hook must be installed as a symlink to claude_transcript_sanitizer/hooks/pre-commit, not a copy)" >&2
+  exit 1
+fi
+
+# shellcheck source=../bin/lib/lock.sh
+source "$SANITIZER_REPO_ROOT/bin/lib/lock.sh"
+
+GITLEAKS_BIN="$HOME/.local/share/mise/installs/gitleaks/8.30.1/gitleaks"
+
+echo "=== Stage 0: lock/reentrancy ==="
+LOCK_ACQUIRE_RC=0
+lock_acquire_or_reentrant "recipe" || LOCK_ACQUIRE_RC=$?
+
+# Every branch except "acquired" installs its OWN exit trap here, purely to
+# patch this run's outcome record with the hook's real final exit code once
+# its own stages (Stage 1 gitleaks etc., or nothing at all on the abort
+# path) have actually completed -- lock_acquire_or_reentrant wrote the
+# record with exit_code:null before any of that ran, since it can't yet
+# know it. This trap must NOT touch lock/lock.owner semantics (only the
+# acquirer's own lock_on_exit trap, installed inside lock.sh, owns those).
+if [[ "${LOCK_STATE:-}" != "acquired" ]]; then
+  trap 'lock_patch_outcome_exit_code "$?" "$LOCK_STATE" "$LOCK_RUN_ID" "$LOCK_ROLE"' EXIT
+fi
+
+if [[ "$LOCK_ACQUIRE_RC" -ne 0 ]]; then
+  echo
+  echo "BLOCKED: could not acquire the sanitizer lock, and this run is not a"
+  echo "recognized reentrant call (lock held by an unrelated process, or by"
+  echo "a stale/dead owner). Commit aborted — HOOK_ABORT_LOCK."
+  exit 1
+fi
+echo "lock: ${LOCK_RESULT} (run_id=${LOCK_RUN_ID})"
+echo
+
+# --- Stage 0.5: refuse a target-repo .gitleaksignore outright ---
+# Defense in depth, not the primary control (Stage 1's blob-materialization
+# below is what actually keeps gitleaks from ever seeing a target-repo
+# .gitleaksignore) -- but still worth refusing on principle, so one never
+# lands in a synced repo's history where a LATER, differently-invoked
+# gitleaks pass (e.g. bin/gitleaks-gate.sh scanning the built mirror) might
+# honor it. Checks the actual FILESYSTEM, not `git diff --cached` -- an
+# earlier version of this check inspected only staged filenames, which (a)
+# never sees an untracked or previously-committed .gitleaksignore, and (b)
+# piped `git diff --cached --name-only | grep -q`, which SIGPIPEs `git`
+# once the staged file list exceeds one pipe buffer, and under `set -o
+# pipefail` that silently skips the whole check (both measured empirically,
+# round-3 CODE review). A plain existence check has neither problem, and a
+# `git rm` that deletes the file (no longer present on disk by hook time)
+# is correctly allowed through.
+REPO_TOPLEVEL="$(git rev-parse --show-toplevel)"
+if [[ -e "$REPO_TOPLEVEL/.gitleaksignore" ]]; then
+  echo
+  echo "BLOCKED: this repo has a .gitleaksignore file (tracked, untracked, or"
+  echo "committed earlier -- doesn't matter which). This sanitizer repo never"
+  echo "honors one; remove it. (Stage 1 below doesn't even look at it, but a"
+  echo "later scan of the synced mirror by other tooling might.)"
+  exit 1
+fi
+
+# --- Stage 1: gitleaks (known secret patterns) ---
+# Scans the STAGED BLOB CONTENTS, not `git diff`'s text output. Measured
+# empirically (round-3 CODE review) that `gitleaks protect --staged` scans
+# git's own textual diff -- and the target repo controls that diff's
+# content via `.gitattributes`: a staged `path -diff` entry makes git treat
+# a file as binary, so the diff for it is empty and gitleaks scans nothing.
+# Materializing each staged file's actual index content via `git show`
+# sidesteps git's diff/attribute machinery entirely; `.gitattributes` has
+# no effect on `git show`'s output (attributes govern checkout/diff/merge
+# filtering, not blob retrieval). Matches bin/gitleaks-gate.sh's existing
+# `gitleaks dir` approach, for the same underlying reason.
+#
+# Every invocation runs gitleaks in a subshell that first closes EVERY fd
+# open on the lock file, so a hung/orphaned child can never hold the flock
+# past this hook's own exit. This applies on BOTH branches, not just
+# "acquired": on the reentrant branch, THIS process never opened a lock fd
+# of its own (lock.sh already closed that attempt), but the GRANDPARENT
+# acquirer's fd (opened via bash's `{name}>` allocation, which is NOT
+# close-on-exec) is inherited across fork/exec — first into `git commit`,
+# then into this hook process itself, and from there into every child it
+# spawns — so it is just as open here as on the acquired branch, under a
+# different fd number lock.sh never allocated and has no variable for.
+# lock_close_all_lock_fds finds it (and the acquired-branch's own LOCK_FD)
+# by scanning /proc/$$/fd for whatever fd(s) point at the lock file,
+# rather than assuming a specific number.
+#
+# NOTE: `command {LOCK_FD}>&-` is NOT valid here — the `{name}` redirection
+# form only allocates a fresh fd on open, it does not resolve an existing
+# variable's fd number for a close (verified empirically in Phase A). A
+# subshell that closes the numeric fd(s) via eval, then `exec`s the real
+# binary (replacing the subshell's own image), closes them only for that
+# child — the parent hook process's own copy (needed by the acquirer's
+# EXIT trap) is untouched.
+#
+# --config pins resolution to THIS repo's own .gitleaks.toml, never the
+# invoking (target) repo's -- gitleaks otherwise resolves .gitleaks.toml
+# from cwd, which at hook-run time is the target repo, and a permissive one
+# planted there would otherwise silently disable the gate (transcript
+# content is attacker-influenceable by construction). --ignore-gitleaks-allow
+# closes the third vector the same way: an inline `# gitleaks:allow` comment
+# in materialized content is ignored. There is no `-i`/ignore-path flag here
+# at all -- the scan dir never contains a .gitleaksignore (materialize_staged
+# below refuses to write one into it), so there is nothing for gitleaks to
+# additively discover regardless of cwd. --exit-code 7 on a genuine finding
+# (vs. any other non-zero for a tool failure) is what lets Stage 1 below
+# distinguish "found a leak" from "the scanner itself failed to run" --
+# without it, a missing/malformed config exits 1, indistinguishable from a
+# real finding, and reports a false "secret found".
+# --diff-filter=ACMRT (not ACMR): T (typechange, e.g. a staged
+# symlink<->regular-file swap) must be materialized and scanned too -- a
+# bare ACMR silently drops typechange entries from `git diff --cached
+# --name-only`, so a staged symlink->regular-file swap carrying a live
+# secret was never even listed here, let alone scanned (found + reproduced
+# with a real secret, round-3 fix pass on issue #3, fix P0).
+#
+# Echoes "<staged_count> <materialized_count>" on stdout as its only
+# output -- the caller (run_gitleaks) hard-fails the commit if they don't
+# match, rather than silently scanning an incomplete set (fix P1). Driven
+# via `< <(...)` process substitution, not a `| while` pipe -- a pipe runs
+# the loop body in a subshell, and any counter set inside it would not be
+# visible to this function's own `echo` below (bash `lastpipe` is not
+# reliably in effect here). A `git show` failure is now counted as a
+# materialization failure (not `|| true`-swallowed) -- that's the exact
+# gap fix P1 exists to close.
+materialize_staged() {
+  local scan_dir="$1"
+  local f
+  local staged_count=0
+  local materialized_count=0
+  while IFS= read -r -d '' f; do
+    # Never materialize a target-repo .gitleaksignore into the scan dir --
+    # gitleaks would auto-discover and honor it sitting right there,
+    # reopening the exact vector this rewrite exists to close. Excluded
+    # from both counts -- it is deliberately never materialized.
+    case "$f" in
+      .gitleaksignore|*/.gitleaksignore) continue ;;
+    esac
+    staged_count=$((staged_count + 1))
+    if mkdir -p "$scan_dir/$(dirname "$f")" && git show ":$f" > "$scan_dir/$f" 2>/dev/null; then
+      materialized_count=$((materialized_count + 1))
+    else
+      rm -f "$scan_dir/$f"
+    fi
+  done < <(git diff --cached --name-only --diff-filter=ACMRT -z)
+  echo "$staged_count $materialized_count"
+}
+
+run_gitleaks() {
+  local scan_dir
+  scan_dir="$(mktemp -d)" || return 1
+  local counts staged_count materialized_count
+  counts="$(materialize_staged "$scan_dir")"
+  staged_count="${counts% *}"
+  materialized_count="${counts#* }"
+  if [[ "$staged_count" -ne "$materialized_count" ]]; then
+    echo "materialize_staged: only $materialized_count/$staged_count staged files were" >&2
+    echo "materialized into the scan dir (a mkdir or git show failed on at least one" >&2
+    echo "staged path) -- refusing to scan an incomplete set." >&2
+    rm -rf "$scan_dir"
+    return 8
+  fi
+  ( lock_close_all_lock_fds
+    exec "$GITLEAKS_BIN" dir "$scan_dir" --redact --no-banner \
+      --config "$SANITIZER_REPO_ROOT/.gitleaks.toml" \
+      --ignore-gitleaks-allow \
+      --exit-code 7 )
+  local rc=$?
+  rm -rf "$scan_dir"
+  return $rc
+}
+
+echo "=== Stage 1: gitleaks (known secret patterns) ==="
+GITLEAKS_RC=0
+run_gitleaks || GITLEAKS_RC=$?
+if [[ "$GITLEAKS_RC" -eq 7 ]]; then
+  echo
+  echo "BLOCKED: gitleaks found a likely secret in staged changes. Commit aborted."
+  echo "Rotate/remove it. A gitleaks:allow comment or .gitleaksignore entry in this"
+  echo "(the target) repo will NOT suppress this — those are intentionally ignored."
+  echo "A genuine false positive is fixed by adding a rule to this sanitizer repo's"
+  echo "own .gitleaks.toml, which is version-controlled and reviewable."
+  exit 1
+elif [[ "$GITLEAKS_RC" -eq 8 ]]; then
+  echo
+  echo "BLOCKED: staged-file materialization was incomplete (see message above)." >&2
+  echo "Commit aborted rather than scanning a partial set — this is a fail-closed" >&2
+  echo "security control, not a false positive. Retry the commit; if it persists," >&2
+  echo "investigate the mkdir/git show failure named above." >&2
+  exit 1
+elif [[ "$GITLEAKS_RC" -ne 0 ]]; then
+  echo
+  echo "BLOCKED: gitleaks failed to run (exit $GITLEAKS_RC) — this is a tool" >&2
+  echo "failure, not a detected secret. Check that $GITLEAKS_BIN exists and" >&2
+  echo "that $SANITIZER_REPO_ROOT/.gitleaks.toml is present and valid." >&2
+  exit 1
+fi
+echo "gitleaks: clean."
+echo
+
+echo "=== Stage 2: business-sensitivity review ==="
+echo "(deferred to Phase B — not implemented, always passes in Phase A)"
+
+exit 0
