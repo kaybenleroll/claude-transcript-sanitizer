@@ -10,4 +10,4 @@ RUN_DIR="${MIRROR_RUN_DIR:-$REPO_ROOT/.scratch/mirror-runs}"
 
 mkdir -p "$DEST" "$RUN_DIR"
 
-uv run python3 -m sanitize.mirror build --dest "$DEST" --run-dir "$RUN_DIR"
+mise exec -- uv run python3 -m sanitize.mirror build --dest "$DEST" --run-dir "$RUN_DIR"

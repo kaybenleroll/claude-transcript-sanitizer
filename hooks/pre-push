@@ -42,19 +42,26 @@ ZERO_SHA="0000000000000000000000000000000000000000"
 # `uv` resolves via an interactive-shell alias on this machine (`uv='sfw
 # uv'`), which is NOT visible here -- git execs a hook by its own shebang,
 # never through the pushing shell, so shell aliases never apply to it.
-# Fail closed with a clear message rather than silently skipping the test
-# run if `uv` isn't a real PATH entry in this hook's environment.
-echo "=== pre-push: test suite ==="
-if ! command -v uv >/dev/null 2>&1; then
-  echo "BLOCKED: 'uv' not found on PATH -- cannot run the test suite." >&2
+# Same GITLEAKS_BIN resolution convention as Stage 2 below (and as
+# hooks/pre-commit): a hardcoded mise install path, not `command -v` or
+# `mise exec --` -- a git hook's environment can't be relied on to have
+# mise's shims/activation on PATH any more than uv's alias above. Pinned
+# version must match mise.toml's `uv` entry. Note uv's mise install layout
+# nests an extra arch-specific directory (unlike gitleaks' flat layout).
+UV_BIN="$HOME/.local/share/mise/installs/uv/0.12.5/uv-x86_64-unknown-linux-musl/uv"
+if [[ ! -x "$UV_BIN" ]]; then
+  echo "BLOCKED: uv binary not found at $UV_BIN -- cannot run the test suite." >&2
   echo "(a shell alias for uv, if that's how you normally invoke it, is NOT" >&2
   echo "visible to a git hook -- git execs hooks directly by their shebang," >&2
-  echo "not through your interactive shell. Put the real uv binary/shim on" >&2
-  echo "PATH, e.g. mise's shims dir.)" >&2
+  echo "not through your interactive shell. Same resolution convention as" >&2
+  echo "GITLEAKS_BIN below and in hooks/pre-commit: a hardcoded mise install" >&2
+  echo "path. Check mise.toml's uv version and the actual install path under" >&2
+  echo "\$HOME/.local/share/mise/installs/uv/.)" >&2
   exit 1
 fi
+echo "=== pre-push: test suite ==="
 
-if ! uv run pytest tests/ -q; then
+if ! "$UV_BIN" run pytest tests/ -q; then
   echo
   echo "BLOCKED: test suite failed. Push aborted." >&2
   exit 1

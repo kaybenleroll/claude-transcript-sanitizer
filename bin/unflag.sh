@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 HASH="${1:?usage: unflag.sh <content_hash>}"
 export UNFLAG_HASH="$HASH"
-uv run python3 -c "
+mise exec -- uv run python3 -c "
 import os
 from sanitize.ledger import unflag, DEFAULT_LEDGER_PATH
 e = unflag(DEFAULT_LEDGER_PATH, os.environ['UNFLAG_HASH'])

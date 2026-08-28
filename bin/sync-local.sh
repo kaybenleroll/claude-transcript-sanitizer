@@ -90,7 +90,7 @@ sync_subdirectory = "projects"
 EOF
 
 echo "validating init.toml parses..."
-uv run python3 -c "
+mise exec -- uv run python3 -c "
 import tomllib
 with open('$INIT_TOML', 'rb') as f:
     cfg = tomllib.load(f)
@@ -145,7 +145,7 @@ echo '*.tmp' > "$THROWAWAY_REPO/.gitignore"
 echo "pre-seeded $THROWAWAY_REPO/.gitignore with '*.tmp' before push (push's ensure_ignore_files() appends its managed block after this line, preserving it outside the block)"
 
 echo "step 2/3: patching max_file_size_bytes=$MAX_FILE_SIZE_BYTES into $CONFIG_TOML..."
-uv run python3 -c "
+mise exec -- uv run python3 -c "
 import re
 path = '$CONFIG_TOML'
 with open(path) as f:
@@ -321,7 +321,7 @@ if [ ! -f "$FIXED_SUMMARY" ]; then
   echo "FAIL: Gate B4 -- fixed-path summary.json not found at $FIXED_SUMMARY (run 'just build-mirror' first)." >&2
   GATE_B4_STATUS=1
 else
-  SKIP_CEILING_EXCEEDED="$(uv run python3 -c "
+  SKIP_CEILING_EXCEEDED="$(mise exec -- uv run python3 -c "
 import json
 with open('$FIXED_SUMMARY') as f:
     d = json.load(f)
@@ -349,7 +349,7 @@ echo "gitleaks report: $GITLEAKS_REPORT"
 echo "gitleaks exit: $GITLEAKS_STATUS"
 if [ "$GITLEAKS_STATUS" -ne 0 ]; then
   echo "FAIL: gitleaks findings on committed tree. Breakdown:"
-  uv run python3 -c "
+  mise exec -- uv run python3 -c "
 import json
 from collections import Counter
 try:

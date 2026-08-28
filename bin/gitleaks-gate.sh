@@ -23,7 +23,7 @@ echo "report: $REPORT"
 echo "exit: $STATUS"
 if [ "$STATUS" -ne 0 ]; then
   echo "FAIL: findings present. Breakdown:"
-  uv run python3 -c "
+  mise exec -- uv run python3 -c "
 import json
 from collections import Counter
 try:

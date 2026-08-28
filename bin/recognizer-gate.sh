@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 TARGET="${1:?usage: recognizer-gate.sh <target-dir>}"
 
 set +e
-HITS="$(uv run python3 -c "
+HITS="$(mise exec -- uv run python3 -c "
 from pathlib import Path
 import re
 from sanitize.recognizers import CREDENTIAL_PREFIX_PATTERNS

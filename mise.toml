@@ -10,3 +10,4 @@
 [tools]
 python = "3.12"
 gitleaks = "8.30.1"
+uv = "0.12.5"

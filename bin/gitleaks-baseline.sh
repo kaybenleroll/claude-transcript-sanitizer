@@ -22,9 +22,9 @@ ln -sf "$(basename "$REPORT")" "$LATEST_LINK"
 
 echo "report: $REPORT"
 echo "latest symlink: $LATEST_LINK"
-echo "total findings: $(uv run python3 -c "import json; print(len(json.load(open('$REPORT'))))")"
+echo "total findings: $(mise exec -- uv run python3 -c "import json; print(len(json.load(open('$REPORT'))))")"
 echo "by rule:"
-uv run python3 -c "
+mise exec -- uv run python3 -c "
 import json
 from collections import Counter
 findings = json.load(open('$REPORT'))
@@ -33,7 +33,7 @@ for rule, n in sorted(by_rule.items(), key=lambda x: -x[1]):
     print(f'  {rule}: {n}')
 "
 echo "by extension:"
-uv run python3 -c "
+mise exec -- uv run python3 -c "
 import json
 from collections import Counter
 findings = json.load(open('$REPORT'))
@@ -42,7 +42,7 @@ for ext, n in sorted(by_ext.items(), key=lambda x: -x[1]):
     print(f'  .{ext}: {n}')
 "
 echo "jsonl files with findings:"
-uv run python3 -c "
+mise exec -- uv run python3 -c "
 import json
 findings = json.load(open('$REPORT'))
 files = sorted({f['File'] for f in findings if f['File'].endswith('.jsonl')})

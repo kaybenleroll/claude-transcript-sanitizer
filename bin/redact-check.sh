@@ -4,4 +4,4 @@
 # files (re-derived from the gitleaks baseline, not hardcoded) should appear.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-uv run python3 -m sanitize.mirror check
+mise exec -- uv run python3 -m sanitize.mirror check

@@ -18,4 +18,4 @@ if [ ! -d "$MIRROR" ]; then
   exit 1
 fi
 
-uv run python3 -m sanitize.classify --mirror "$MIRROR" --out "$OUT"
+mise exec -- uv run python3 -m sanitize.classify --mirror "$MIRROR" --out "$OUT"
