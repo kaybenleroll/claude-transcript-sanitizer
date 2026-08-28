@@ -29,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LOCK_SH = REPO_ROOT / "bin" / "lib" / "lock.sh"
 HOOK_SRC = REPO_ROOT / "hooks" / "pre-commit"
 WRAPPER_DOUBLE = REPO_ROOT / "tests" / "fixtures" / "test_double_wrapper.sh"
+GATE_SH = REPO_ROOT / "bin" / "gitleaks-gate.sh"
 
 
 # --------------------------------------------------------------------------
@@ -1627,33 +1628,78 @@ def test_mutant_diff_based_scan_misses_gitattributes_suppressed_secret(tmp_path:
                 f'SANITIZER_REPO_ROOT="{REPO_ROOT}"',
             ),
             (
-                "materialize_staged() {\n"
+                'materialize_staged() {\n'
                 '  local scan_dir="$1"\n'
-                "  local f\n"
-                "  local staged_count=0\n"
-                "  local materialized_count=0\n"
+                '  # This function\'s ONLY call site is `counts="$(materialize_staged\n'
+                '  # "$scan_dir")"` below -- a command-substitution `$(...)`, which ALWAYS\n'
+                '  # forks a fresh subshell to run it. So $BASHPID here is never the main\n'
+                "  # hook process's own pid, and lock_close_all_lock_fds is safe to call\n"
+                '  # directly (see bin/lib/lock.sh: it must NEVER be called directly in the\n'
+                "  # main process's own shell -- this isn't that). Closing it FIRST, before\n"
+                '  # the mkdir/git show loop below ever forks anything, closes this\n'
+                "  # subshell's own inherited duplicate of the lock fd immediately -- so\n"
+                '  # mkdir/git show (and everything else in this function) never inherit it\n'
+                '  # either, without needing to wrap each one in its own subshell. Without\n'
+                '  # this, the command-substitution subshell itself keeps an open duplicate\n'
+                "  # of the lock fd for this function's entire runtime regardless of\n"
+                "  # anything gitleaks's own subshell does later, and a hung `git show`\n"
+                '  # (e.g. a corrupt/locked object store) orphaned by a hook crash would\n'
+                "  # hold the flock past this hook's own exit (measured empirically: a\n"
+                '  # per-iteration `( lock_close_all_lock_fds; mkdir && git show )` subshell\n'
+                '  # closes ITS OWN copy correctly but leaves the enclosing\n'
+                "  # command-substitution subshell's copy open the whole time -- that\n"
+                '  # subshell surviving a hook crash was what actually kept the lock held).\n'
+                '  # If this function is ever called any other way (not via `$(...)`), this\n'
+                "  # call must move to wrap the loop body's fork instead.\n"
+                '  lock_close_all_lock_fds\n'
+                '  local f\n'
+                '  local staged_count=0\n'
+                '  local materialized_count=0\n'
                 "  while IFS= read -r -d '' f; do\n"
-                "    # Never materialize a target-repo .gitleaksignore into the scan dir --\n"
-                "    # gitleaks would auto-discover and honor it sitting right there,\n"
-                "    # reopening the exact vector this rewrite exists to close. Excluded\n"
-                "    # from both counts -- it is deliberately never materialized.\n"
-                "    case \"$f\" in\n"
-                "      .gitleaksignore|*/.gitleaksignore) continue ;;\n"
-                "    esac\n"
-                "    staged_count=$((staged_count + 1))\n"
+                '    # Never materialize a target-repo .gitleaksignore into the scan dir --\n'
+                '    # gitleaks would auto-discover and honor it sitting right there,\n'
+                '    # reopening the exact vector this rewrite exists to close. Excluded\n'
+                '    # from both counts -- it is deliberately never materialized.\n'
+                '    case "$f" in\n'
+                '      .gitleaksignore|*/.gitleaksignore) continue ;;\n'
+                '    esac\n'
+                '    staged_count=$((staged_count + 1))\n'
                 '    if mkdir -p "$scan_dir/$(dirname "$f")" && git show ":$f" > "$scan_dir/$f" 2>/dev/null; then\n'
-                "      materialized_count=$((materialized_count + 1))\n"
-                "    else\n"
+                '      materialized_count=$((materialized_count + 1))\n'
+                '    else\n'
                 '      rm -f "$scan_dir/$f"\n'
-                "    fi\n"
+                '    fi\n'
                 '  done < <(git diff --cached --name-only --diff-filter=ACMRT -z)\n'
                 '  echo "$staged_count $materialized_count"\n'
-                "}\n"
-                "\n"
-                "run_gitleaks() {\n"
-                "  local scan_dir\n"
+                '}\n'
+                '\n'
+                'run_gitleaks() {\n'
+                '  local scan_dir\n'
                 '  scan_dir="$(mktemp -d)" || return 1\n'
-                "  local counts staged_count materialized_count\n"
+                '\n'
+                '  # Compose our scan_dir cleanup onto whatever EXIT trap is already\n'
+                "  # installed (lock.sh's `lock_on_exit` on the acquired branch; this\n"
+                "  # hook's own `lock_patch_outcome_exit_code` wrapper on the\n"
+                '  # reentrant/abort branches) rather than replacing it outright -- bash\n'
+                '  # has exactly one EXIT trap slot, and a bare `trap ... EXIT` here would\n'
+                '  # silently clobber the lock-release trap instead of composing with it.\n'
+                '  # `trap -p EXIT` captures whatever is currently installed there (empty\n'
+                '  # if nothing is) so it can be chained. This closes the gap where a\n'
+                '  # SIGINT/SIGTERM during a slow gitleaks run left the materialized\n'
+                '  # staged-blob contents (i.e. exactly the secrets under scan) sitting\n'
+                '  # under $TMPDIR indefinitely -- previously cleanup only ran on this\n'
+                "  # function's own normal-return path below, never on a\n"
+                '  # signal-interrupted exit of the whole hook process.\n'
+                '  local prior_exit_trap\n'
+                '  prior_exit_trap="$(trap -p EXIT)"\n'
+                '  prior_exit_trap="${prior_exit_trap#trap -- \\\'}"\n'
+                '  prior_exit_trap="${prior_exit_trap%\\\' EXIT}"\n'
+                "  # $scan_dir is intentionally expanded NOW (this function's own `local`\n"
+                '  # scope), not at trap-fire time -- by the time this trap could fire, the\n'
+                '  # local variable may no longer be in scope at all.\n'
+                '  trap "rm -rf \'$scan_dir\'; $prior_exit_trap" EXIT\n'
+                '\n'
+                '  local counts staged_count materialized_count\n'
                 '  counts="$(materialize_staged "$scan_dir")"\n'
                 '  staged_count="${counts% *}"\n'
                 '  materialized_count="${counts#* }"\n'
@@ -1661,18 +1707,20 @@ def test_mutant_diff_based_scan_misses_gitattributes_suppressed_secret(tmp_path:
                 '    echo "materialize_staged: only $materialized_count/$staged_count staged files were" >&2\n'
                 '    echo "materialized into the scan dir (a mkdir or git show failed on at least one" >&2\n'
                 '    echo "staged path) -- refusing to scan an incomplete set." >&2\n'
+                '    trap "$prior_exit_trap" EXIT\n'
                 '    rm -rf "$scan_dir"\n'
-                "    return 8\n"
-                "  fi\n"
-                "  ( lock_close_all_lock_fds\n"
+                '    return 8\n'
+                '  fi\n'
+                '  ( lock_close_all_lock_fds\n'
                 '    exec "$GITLEAKS_BIN" dir "$scan_dir" --redact --no-banner \\\n'
                 '      --config "$SANITIZER_REPO_ROOT/.gitleaks.toml" \\\n'
-                "      --ignore-gitleaks-allow \\\n"
-                "      --exit-code 7 )\n"
-                "  local rc=$?\n"
+                '      --ignore-gitleaks-allow \\\n'
+                '      --exit-code 7 )\n'
+                '  local rc=$?\n'
+                '  trap "$prior_exit_trap" EXIT\n'
                 '  rm -rf "$scan_dir"\n'
-                "  return $rc\n"
-                "}",
+                '  return $rc\n'
+                '}',
                 "run_gitleaks() {\n"
                 "  ( lock_close_all_lock_fds\n"
                 '    exec "$GITLEAKS_BIN" protect --staged --redact --no-banner \\\n'
@@ -1927,10 +1975,33 @@ def test_mutant_no_completeness_check_lets_materialization_gap_through(
             ),
             INJECT_GAP_REPLACEMENT,
             (
-                "run_gitleaks() {\n"
-                "  local scan_dir\n"
+                'run_gitleaks() {\n'
+                '  local scan_dir\n'
                 '  scan_dir="$(mktemp -d)" || return 1\n'
-                "  local counts staged_count materialized_count\n"
+                '\n'
+                '  # Compose our scan_dir cleanup onto whatever EXIT trap is already\n'
+                "  # installed (lock.sh's `lock_on_exit` on the acquired branch; this\n"
+                "  # hook's own `lock_patch_outcome_exit_code` wrapper on the\n"
+                '  # reentrant/abort branches) rather than replacing it outright -- bash\n'
+                '  # has exactly one EXIT trap slot, and a bare `trap ... EXIT` here would\n'
+                '  # silently clobber the lock-release trap instead of composing with it.\n'
+                '  # `trap -p EXIT` captures whatever is currently installed there (empty\n'
+                '  # if nothing is) so it can be chained. This closes the gap where a\n'
+                '  # SIGINT/SIGTERM during a slow gitleaks run left the materialized\n'
+                '  # staged-blob contents (i.e. exactly the secrets under scan) sitting\n'
+                '  # under $TMPDIR indefinitely -- previously cleanup only ran on this\n'
+                "  # function's own normal-return path below, never on a\n"
+                '  # signal-interrupted exit of the whole hook process.\n'
+                '  local prior_exit_trap\n'
+                '  prior_exit_trap="$(trap -p EXIT)"\n'
+                '  prior_exit_trap="${prior_exit_trap#trap -- \\\'}"\n'
+                '  prior_exit_trap="${prior_exit_trap%\\\' EXIT}"\n'
+                "  # $scan_dir is intentionally expanded NOW (this function's own `local`\n"
+                '  # scope), not at trap-fire time -- by the time this trap could fire, the\n'
+                '  # local variable may no longer be in scope at all.\n'
+                '  trap "rm -rf \'$scan_dir\'; $prior_exit_trap" EXIT\n'
+                '\n'
+                '  local counts staged_count materialized_count\n'
                 '  counts="$(materialize_staged "$scan_dir")"\n'
                 '  staged_count="${counts% *}"\n'
                 '  materialized_count="${counts#* }"\n'
@@ -1938,13 +2009,16 @@ def test_mutant_no_completeness_check_lets_materialization_gap_through(
                 '    echo "materialize_staged: only $materialized_count/$staged_count staged files were" >&2\n'
                 '    echo "materialized into the scan dir (a mkdir or git show failed on at least one" >&2\n'
                 '    echo "staged path) -- refusing to scan an incomplete set." >&2\n'
+                '    trap "$prior_exit_trap" EXIT\n'
                 '    rm -rf "$scan_dir"\n'
-                "    return 8\n"
-                "  fi\n"
-                "  ( lock_close_all_lock_fds\n",
+                '    return 8\n'
+                '  fi\n'
+                '  ( lock_close_all_lock_fds\n'
+                '',
                 "run_gitleaks() {\n"
                 "  local scan_dir\n"
                 '  scan_dir="$(mktemp -d)" || return 1\n'
+                "  local prior_exit_trap=\"\"\n"
                 '  materialize_staged "$scan_dir" >/dev/null\n'
                 "  ( lock_close_all_lock_fds\n",
             ),
@@ -1962,3 +2036,409 @@ def test_mutant_no_completeness_check_lets_materialization_gap_through(
         "incomplete set and let the commit through\n" + result.stdout + result.stderr
     )
     assert commit_count(repo) == 1
+
+
+# --------------------------------------------------------------------------
+# Issue #11 item 1 -- trap-protected scan_dir cleanup on SIGINT.
+# --------------------------------------------------------------------------
+
+
+def _write_slow_gitleaks_hook(
+    tmp_path: Path, name: str, label: str, extra_replacements: list[tuple[str, str]] | None = None
+) -> tuple[Path, Path]:
+    """A mutant hook whose GITLEAKS_BIN points at a stand-in that blocks
+    indefinitely instead of ever exiting (so a real gitleaks run can be
+    reliably interrupted mid-scan), plus instrumentation that records
+    scan_dir's path once mktemp'd. `extra_replacements` layers on top --
+    e.g. reverting run_gitleaks's trap fix, to prove it's what matters."""
+    standin = tmp_path / f"{label}_standin.sh"
+    # `exec sleep 30`, not a blocking `read` -- git connects a pre-commit
+    # hook's own stdin to something that always reads as EOF regardless of
+    # the parent process's stdin (verified empirically: a PIPE stdin held
+    # open on the `git commit` subprocess in this test does NOT reach the
+    # hook), so a `read` here would return immediately instead of blocking.
+    standin.write_text("#!/usr/bin/env bash\nexec sleep 30\n")
+    standin.chmod(0o755)
+    info_file = tmp_path / f"{label}_scan_dir.info"
+    replacements = [
+        (
+            'HOOK_SRC="$(readlink -f "${BASH_SOURCE[0]}")"\n'
+            'SANITIZER_REPO_ROOT="$(dirname "$(dirname "$HOOK_SRC")")"',
+            'HOOK_SRC="$(readlink -f "${BASH_SOURCE[0]}")"\n'
+            f'SANITIZER_REPO_ROOT="{REPO_ROOT}"',
+        ),
+        (
+            'GITLEAKS_BIN="$HOME/.local/share/mise/installs/gitleaks/8.30.1/gitleaks"',
+            f'GITLEAKS_BIN="{standin}"',
+        ),
+        (
+            '  scan_dir="$(mktemp -d)" || return 1\n',
+            '  scan_dir="$(mktemp -d)" || return 1\n' f'  echo "$scan_dir" > "{info_file}"\n',
+        ),
+    ]
+    if extra_replacements:
+        replacements.extend(extra_replacements)
+    hook = write_mutant_hook(tmp_path, name, LOCK_SH, replacements)
+    return hook, info_file
+
+
+def _run_sigint_scan_dir_scenario(
+    tmp_path: Path, state_dir: Path, hook_src: Path, info_file: Path, label: str
+) -> bool:
+    """Starts a real `git commit` (hook installed, real gitleaks stand-in
+    blocking mid-scan), SIGINTs the whole process group like a terminal
+    Ctrl-C once scan_dir exists on disk, then reports whether scan_dir
+    survived the interrupted hook process."""
+    repo = make_repo(tmp_path, f"repo_{label}")
+    install_hook(repo, hook_src=hook_src)
+    stage_file(repo, "f.txt", "hello\n")
+
+    env = {**os.environ, "SANITIZER_STATE_DIR": str(state_dir)}
+    proc = subprocess.Popen(
+        ["git", "commit", "-m", f"sigint scenario {label}"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    deadline = time.time() + 10
+    while not info_file.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert info_file.exists(), f"hook did not reach run_gitleaks in time ({label})"
+    scan_dir = Path(info_file.read_text().strip())
+
+    # Give the stand-in a moment to actually be exec'd and blocking.
+    time.sleep(0.3)
+    assert scan_dir.is_dir(), f"scan_dir {scan_dir} should exist while the gitleaks stand-in is running"
+
+    os.killpg(proc.pid, signal.SIGINT)  # like a real terminal Ctrl-C on the whole foreground group
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=5)
+    time.sleep(0.3)
+
+    return scan_dir.exists()
+
+
+def test_scan_dir_removed_on_sigint_during_gitleaks(tmp_path: Path, _isolated_state_dir: Path):
+    """Fix (issue #11 item 1): a SIGINT that kills the whole hook process
+    group while gitleaks is still running must not leave the materialized
+    staged-blob scan_dir (i.e. the secrets under scan) behind under
+    $TMPDIR. Exercises the real, shipped run_gitleaks trap-composition
+    logic unmodified -- only GITLEAKS_BIN is swapped for a stand-in that
+    blocks instead of ever exiting."""
+    state_dir = _isolated_state_dir
+    hook, info_file = _write_slow_gitleaks_hook(tmp_path, "slow_gitleaks_good.sh", "good_sigint")
+
+    survived = _run_sigint_scan_dir_scenario(tmp_path, state_dir, hook, info_file, "good_sigint")
+
+    assert not survived, (
+        "scan_dir should have been removed by the composed EXIT trap when "
+        "the hook process was SIGINT'd mid-scan"
+    )
+
+
+def test_mutant_no_trap_leaves_scan_dir_after_sigint(tmp_path: Path, _isolated_state_dir: Path):
+    """Mutant: revert run_gitleaks to the pre-fix shape (a plain `rm -rf
+    "$scan_dir"` only at the very end of the function, no EXIT trap at
+    all). Proves the previous test actually bites -- without the trap, a
+    SIGINT mid-scan leaves scan_dir (containing the materialized staged
+    secrets) behind under $TMPDIR indefinitely."""
+    state_dir = _isolated_state_dir
+    hook, info_file = _write_slow_gitleaks_hook(
+        tmp_path,
+        "slow_gitleaks_bad.sh",
+        "bad_sigint",
+        extra_replacements=[
+            (
+                "  local prior_exit_trap\n"
+                '  prior_exit_trap="$(trap -p EXIT)"\n'
+                "  prior_exit_trap=\"${prior_exit_trap#trap -- \\'}\"\n"
+                "  prior_exit_trap=\"${prior_exit_trap%\\' EXIT}\"\n"
+                "  # $scan_dir is intentionally expanded NOW (this function's own `local`\n"
+                "  # scope), not at trap-fire time -- by the time this trap could fire, the\n"
+                "  # local variable may no longer be in scope at all.\n"
+                "  trap \"rm -rf '$scan_dir'; $prior_exit_trap\" EXIT\n",
+                "",
+            ),
+            (
+                '    trap "$prior_exit_trap" EXIT\n    rm -rf "$scan_dir"\n    return 8\n',
+                '    rm -rf "$scan_dir"\n    return 8\n',
+            ),
+            (
+                '  local rc=$?\n  trap "$prior_exit_trap" EXIT\n  rm -rf "$scan_dir"\n  return $rc\n',
+                '  local rc=$?\n  rm -rf "$scan_dir"\n  return $rc\n',
+            ),
+        ],
+    )
+
+    survived = _run_sigint_scan_dir_scenario(tmp_path, state_dir, hook, info_file, "bad_sigint")
+
+    assert survived, (
+        "mutant (no EXIT trap, pre-fix shape) was expected to leave scan_dir "
+        "behind after a SIGINT mid-scan, but it didn't -- mutant did not "
+        "reproduce the intended bug"
+    )
+
+
+# --------------------------------------------------------------------------
+# Issue #11 item 2 -- materialize_staged's own forked children (mkdir, git
+# show) must not inherit an open lock fd either.
+# --------------------------------------------------------------------------
+
+
+def test_materialize_staged_children_do_not_inherit_lock_fd(tmp_path: Path, _isolated_state_dir: Path):
+    """Fix (issue #11 item 2): materialize_staged's forked children (mkdir,
+    git show) must not inherit an open lock fd either -- previously
+    lock_close_all_lock_fds only ran in run_gitleaks's own subshell, AFTER
+    materialize_staged's children had already forked. materialize_staged
+    is only ever called via `$(materialize_staged ...)` command
+    substitution (see run_gitleaks), which itself forks a subshell that
+    inherits a duplicate of the lock fd -- the shipped fix closes that
+    duplicate as materialize_staged's own first statement, before anything
+    it forks can inherit it. Same shape as the existing fd-inheritance
+    tests (a real hung `git show` can't be forced without mutating hook
+    code -- see the comment above INJECT_GAP_REPLACEMENT): a long-running,
+    uniquely-named stand-in replaces the mkdir+git-show step so it can be
+    found and cleaned up afterward without touching unrelated processes;
+    the hook process itself (the acquirer, in the acquired branch of a
+    real `git commit`) is SIGKILLed out from under it to simulate a crash
+    bypassing lock_on_exit entirely, then the lock file is probed for
+    FREE/BLOCKED. (A `sleep N &` background form was tried first and
+    rejected -- backgrounding inside the subshell forks an EXTRA hidden
+    subshell of its own for the async job, which itself inherits an
+    unclosed duplicate of the lock fd and produces a false BLOCKED
+    regardless of the fix; a plain foreground `sleep N` matches the fork
+    depth of the real mkdir/git-show call exactly.)"""
+    state_dir = _isolated_state_dir
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    materialize_anchor_old = (
+        'if mkdir -p "$scan_dir/$(dirname "$f")" && git show ":$f" > "$scan_dir/$f" 2>/dev/null; then'
+    )
+    close_call_old = "  lock_close_all_lock_fds\n  local f\n"
+    close_call_removed = "  local f\n"
+
+    def run_scenario(close_fd: bool, label: str) -> bool:
+        pid_file = tmp_path / f"{label}_hook.pid"
+        # A distinctive, unlikely-to-collide duration so the stand-in
+        # process can be found and killed afterward via `pgrep -f` without
+        # risking a match against an unrelated `sleep` elsewhere on the
+        # machine.
+        duration = f"29.{abs(hash(label)) % 900000 + 100000}"
+        materialize_anchor_new = f"if sleep {duration}; then"
+
+        replacements = [
+            (
+                'HOOK_SRC="$(readlink -f "${BASH_SOURCE[0]}")"\n'
+                'SANITIZER_REPO_ROOT="$(dirname "$(dirname "$HOOK_SRC")")"',
+                'HOOK_SRC="$(readlink -f "${BASH_SOURCE[0]}")"\n'
+                f'SANITIZER_REPO_ROOT="{REPO_ROOT}"',
+            ),
+            (
+                'source "$SANITIZER_REPO_ROOT/bin/lib/lock.sh"',
+                'source "$SANITIZER_REPO_ROOT/bin/lib/lock.sh"\n' f'echo $$ > "{pid_file}"',
+            ),
+            (materialize_anchor_old, materialize_anchor_new),
+        ]
+        if not close_fd:
+            # Pre-fix shape: strip the lock_close_all_lock_fds call this
+            # fix adds at the top of materialize_staged, reproducing the
+            # original bug.
+            replacements.append((close_call_old, close_call_removed))
+
+        hook = write_mutant_hook(tmp_path, f"materialize_fd_{label}.sh", LOCK_SH, replacements)
+
+        repo = make_repo(tmp_path, f"repo_{label}")
+        install_hook(repo, hook_src=hook)
+        stage_file(repo, "f.txt", "hello\n")
+
+        env = {**os.environ, "SANITIZER_STATE_DIR": str(state_dir)}
+        proc = subprocess.Popen(
+            ["git", "commit", "-m", f"fd inheritance scenario {label}"],
+            cwd=repo,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        deadline = time.time() + 10
+        while not pid_file.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert pid_file.exists(), f"hook failed to start in time ({label})"
+        hook_pid = int(pid_file.read_text().strip())
+
+        # Give materialize_staged a moment to actually reach and fork the
+        # stand-in `sleep` before we crash the hook process out from
+        # under it.
+        time.sleep(0.3)
+
+        os.kill(hook_pid, signal.SIGKILL)  # simulate a crash, bypassing lock_on_exit entirely
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(0.3)
+
+        probe = subprocess.run(
+            ["bash", "-c", f'exec {{FD}}>"{state_dir}/lock"; flock -n "$FD" && echo FREE || echo BLOCKED'],
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(["pkill", "-9", "-f", f"sleep {duration}"], capture_output=True)
+        return "FREE" in probe.stdout
+
+    good_is_free = run_scenario(close_fd=True, label="good_materialize")
+    (state_dir / "lock").unlink(missing_ok=True)
+    bad_is_free = run_scenario(close_fd=False, label="bad_materialize")
+
+    assert good_is_free, (
+        "materialize_staged: when it closes its own inherited duplicate of "
+        "the lock fd before forking children (current shipped code), a "
+        "hook-process crash must still leave the lock free"
+    )
+    assert not bad_is_free, (
+        "regression check: without materialize_staged closing its "
+        "inherited lock fd, the command-substitution subshell it runs in "
+        "was expected to keep the lock held even after the hook process "
+        "(the acquirer) was killed"
+    )
+
+
+# --------------------------------------------------------------------------
+# Issue #11 item 4 -- bin/gitleaks-gate.sh --config/--ignore-gitleaks-allow
+# parity with hooks/pre-commit's run_gitleaks.
+# --------------------------------------------------------------------------
+
+
+def write_mutant_gate_sh(tmp_path: Path, name: str, replacements: list[tuple[str, str]]) -> Path:
+    text = GATE_SH.read_text()
+    all_replacements = [
+        ('cd "$(dirname "$0")/.."', f'cd "{REPO_ROOT}"'),
+        *replacements,
+    ]
+    for old, new in all_replacements:
+        assert old in text, f"mutation anchor not found in gitleaks-gate.sh: {old!r}"
+        text = text.replace(old, new, 1)
+    mutant_dir = tmp_path / "mutant_gate"
+    mutant_dir.mkdir(exist_ok=True)
+    mutant_path = mutant_dir / name
+    mutant_path.write_text(text)
+    mutant_path.chmod(0o755)
+    return mutant_path
+
+
+def run_gitleaks_gate(
+    script: Path, target: Path, state_dir: Path, run_id: str
+) -> tuple[int, list[dict], subprocess.CompletedProcess]:
+    result = subprocess.run(
+        ["bash", str(script), str(target), run_id],
+        env={**os.environ, "SANITIZER_STATE_DIR": str(state_dir)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    report_path = state_dir / "runs" / f"{run_id}.gitleaks.json"
+    findings = json.loads(report_path.read_text()) if report_path.exists() else []
+    return result.returncode, findings, result
+
+
+def test_gitleaks_gate_catches_secret_via_repo_own_config(tmp_path: Path, _isolated_state_dir: Path):
+    """Fix (issue #11 item 4): bin/gitleaks-gate.sh now pins --config to
+    this repo's own .gitleaks.toml, matching hooks/pre-commit's
+    run_gitleaks. A bare AWS-access-key-shaped secret is only caught by
+    this repo's re-anchored rule, not gitleaks's bundled default ruleset
+    (verified empirically) -- so this also proves --config resolution
+    actually changes behavior here, not just parity on paper."""
+    state_dir = _isolated_state_dir
+    target = tmp_path / "target_good_config"
+    target.mkdir()
+    (target / "secret.txt").write_text(SECRET_CONTENT)
+
+    rc, findings, result = run_gitleaks_gate(GATE_SH, target, state_dir, "good-config-run")
+
+    assert rc == 1, result.stdout + result.stderr
+    assert findings, "expected at least one finding from the repo's re-anchored rule"
+
+
+def test_mutant_gitleaks_gate_without_config_misses_secret(tmp_path: Path, _isolated_state_dir: Path):
+    """Mutant: revert bin/gitleaks-gate.sh to the pre-fix invocation (no
+    --config, no --ignore-gitleaks-allow). Proves the previous test
+    actually bites: without --config, gitleaks falls back to its own
+    (target-path-.gitleaks.toml-or-)bundled-default ruleset, which does not
+    catch a bare AKIAIOSFODNN7EXAMPLE the way this repo's re-anchored rule
+    does (verified empirically -- see hooks/pre-commit's Stage 1
+    comments)."""
+    state_dir = _isolated_state_dir
+    mutant = write_mutant_gate_sh(
+        tmp_path,
+        "no_config.sh",
+        [
+            (
+                '  --config "$REPO_ROOT/.gitleaks.toml" \\\n  --ignore-gitleaks-allow \\\n',
+                "",
+            ),
+        ],
+    )
+    target = tmp_path / "target_mutant_config"
+    target.mkdir()
+    (target / "secret.txt").write_text(SECRET_CONTENT)
+
+    rc, findings, result = run_gitleaks_gate(mutant, target, state_dir, "mutant-config-run")
+
+    assert rc == 0, (
+        "mutant (gitleaks-gate.sh without --config) was expected to miss "
+        "a secret only this repo's re-anchored rule catches\n" + result.stdout + result.stderr
+    )
+    assert not findings
+
+
+def test_gitleaks_gate_catches_gitleaks_allow_suppressed_secret(tmp_path: Path, _isolated_state_dir: Path):
+    """Fix (issue #11 item 4): --ignore-gitleaks-allow means an inline
+    `# gitleaks:allow` comment in the target dir cannot suppress a genuine
+    finding, matching hooks/pre-commit's run_gitleaks."""
+    state_dir = _isolated_state_dir
+    target = tmp_path / "target_allow"
+    target.mkdir()
+    (target / "secret.txt").write_text("AKIAIOSFODNN7EXAMPLE # gitleaks:allow\n")
+
+    rc, findings, result = run_gitleaks_gate(GATE_SH, target, state_dir, "allow-run")
+
+    assert rc == 1, result.stdout + result.stderr
+    assert findings
+
+
+def test_mutant_gitleaks_gate_without_ignore_allow_suppressed(tmp_path: Path, _isolated_state_dir: Path):
+    """Mutant: revert only --ignore-gitleaks-allow (keep --config). Proves
+    the previous test actually bites -- without the flag, the inline
+    `# gitleaks:allow` comment suppresses the same secret and the gate
+    wrongly passes."""
+    state_dir = _isolated_state_dir
+    mutant = write_mutant_gate_sh(
+        tmp_path,
+        "no_ignore_allow.sh",
+        [
+            (
+                '  --config "$REPO_ROOT/.gitleaks.toml" \\\n  --ignore-gitleaks-allow \\\n',
+                '  --config "$REPO_ROOT/.gitleaks.toml" \\\n',
+            ),
+        ],
+    )
+    target = tmp_path / "target_mutant_allow"
+    target.mkdir()
+    (target / "secret.txt").write_text("AKIAIOSFODNN7EXAMPLE # gitleaks:allow\n")
+
+    rc, findings, result = run_gitleaks_gate(mutant, target, state_dir, "mutant-allow-run")
+
+    assert rc == 0, (
+        "mutant (gitleaks-gate.sh without --ignore-gitleaks-allow) was "
+        "expected to let the gitleaks:allow comment suppress the "
+        "secret\n" + result.stdout + result.stderr
+    )
+    assert not findings

@@ -136,10 +136,16 @@ fi
 # planted there would otherwise silently disable the gate (transcript
 # content is attacker-influenceable by construction). --ignore-gitleaks-allow
 # closes the third vector the same way: an inline `# gitleaks:allow` comment
-# in materialized content is ignored. There is no `-i`/ignore-path flag here
-# at all -- the scan dir never contains a .gitleaksignore (materialize_staged
-# below refuses to write one into it), so there is nothing for gitleaks to
-# additively discover regardless of cwd. --exit-code 7 on a genuine finding
+# in materialized content is ignored. There is no `-i`/ignore-path flag
+# here -- gitleaks has no such flag to begin with; a `.gitleaksignore` is
+# instead auto-discovered. Verified empirically that `gitleaks dir` DOES
+# resolve `.gitleaksignore` from the *process cwd* (the target repo's
+# toplevel at hook-run time), not from the scanned dir -- so
+# materialize_staged refusing to write one into scan_dir does NOT close
+# this vector on its own. What actually closes it is Stage 0.5 above,
+# which refuses the commit outright if a `.gitleaksignore` exists anywhere
+# on the target repo's filesystem (tracked, untracked, or already
+# committed) before Stage 1 ever runs gitleaks. --exit-code 7 on a genuine finding
 # (vs. any other non-zero for a tool failure) is what lets Stage 1 below
 # distinguish "found a leak" from "the scanner itself failed to run" --
 # without it, a missing/malformed config exits 1, indistinguishable from a
@@ -162,6 +168,28 @@ fi
 # gap fix P1 exists to close.
 materialize_staged() {
   local scan_dir="$1"
+  # This function's ONLY call site is `counts="$(materialize_staged
+  # "$scan_dir")"` below -- a command-substitution `$(...)`, which ALWAYS
+  # forks a fresh subshell to run it. So $BASHPID here is never the main
+  # hook process's own pid, and lock_close_all_lock_fds is safe to call
+  # directly (see bin/lib/lock.sh: it must NEVER be called directly in the
+  # main process's own shell -- this isn't that). Closing it FIRST, before
+  # the mkdir/git show loop below ever forks anything, closes this
+  # subshell's own inherited duplicate of the lock fd immediately -- so
+  # mkdir/git show (and everything else in this function) never inherit it
+  # either, without needing to wrap each one in its own subshell. Without
+  # this, the command-substitution subshell itself keeps an open duplicate
+  # of the lock fd for this function's entire runtime regardless of
+  # anything gitleaks's own subshell does later, and a hung `git show`
+  # (e.g. a corrupt/locked object store) orphaned by a hook crash would
+  # hold the flock past this hook's own exit (measured empirically: a
+  # per-iteration `( lock_close_all_lock_fds; mkdir && git show )` subshell
+  # closes ITS OWN copy correctly but leaves the enclosing
+  # command-substitution subshell's copy open the whole time -- that
+  # subshell surviving a hook crash was what actually kept the lock held).
+  # If this function is ever called any other way (not via `$(...)`), this
+  # call must move to wrap the loop body's fork instead.
+  lock_close_all_lock_fds
   local f
   local staged_count=0
   local materialized_count=0
@@ -186,6 +214,29 @@ materialize_staged() {
 run_gitleaks() {
   local scan_dir
   scan_dir="$(mktemp -d)" || return 1
+
+  # Compose our scan_dir cleanup onto whatever EXIT trap is already
+  # installed (lock.sh's `lock_on_exit` on the acquired branch; this
+  # hook's own `lock_patch_outcome_exit_code` wrapper on the
+  # reentrant/abort branches) rather than replacing it outright -- bash
+  # has exactly one EXIT trap slot, and a bare `trap ... EXIT` here would
+  # silently clobber the lock-release trap instead of composing with it.
+  # `trap -p EXIT` captures whatever is currently installed there (empty
+  # if nothing is) so it can be chained. This closes the gap where a
+  # SIGINT/SIGTERM during a slow gitleaks run left the materialized
+  # staged-blob contents (i.e. exactly the secrets under scan) sitting
+  # under $TMPDIR indefinitely -- previously cleanup only ran on this
+  # function's own normal-return path below, never on a
+  # signal-interrupted exit of the whole hook process.
+  local prior_exit_trap
+  prior_exit_trap="$(trap -p EXIT)"
+  prior_exit_trap="${prior_exit_trap#trap -- \'}"
+  prior_exit_trap="${prior_exit_trap%\' EXIT}"
+  # $scan_dir is intentionally expanded NOW (this function's own `local`
+  # scope), not at trap-fire time -- by the time this trap could fire, the
+  # local variable may no longer be in scope at all.
+  trap "rm -rf '$scan_dir'; $prior_exit_trap" EXIT
+
   local counts staged_count materialized_count
   counts="$(materialize_staged "$scan_dir")"
   staged_count="${counts% *}"
@@ -194,6 +245,7 @@ run_gitleaks() {
     echo "materialize_staged: only $materialized_count/$staged_count staged files were" >&2
     echo "materialized into the scan dir (a mkdir or git show failed on at least one" >&2
     echo "staged path) -- refusing to scan an incomplete set." >&2
+    trap "$prior_exit_trap" EXIT
     rm -rf "$scan_dir"
     return 8
   fi
@@ -203,6 +255,7 @@ run_gitleaks() {
       --ignore-gitleaks-allow \
       --exit-code 7 )
   local rc=$?
+  trap "$prior_exit_trap" EXIT
   rm -rf "$scan_dir"
   return $rc
 }

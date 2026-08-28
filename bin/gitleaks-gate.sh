@@ -13,8 +13,17 @@ REPORT="$STATE_DIR/runs/${RUN_ID}.gitleaks.json"
 
 mkdir -p "$(dirname "$REPORT")"
 
+# --config pins resolution to THIS repo's own .gitleaks.toml, never
+# whatever cwd this script runs from -- mirrors hooks/pre-commit's
+# run_gitleaks, which does the same for the same reason (a permissive
+# .gitleaks.toml discovered elsewhere would silently disable the gate).
+# --ignore-gitleaks-allow closes the matching vector: an inline
+# `# gitleaks:allow` comment anywhere under $TARGET must not suppress a
+# genuine finding here either.
 set +e
 mise exec -- gitleaks dir "$TARGET" --redact --no-banner \
+  --config "$REPO_ROOT/.gitleaks.toml" \
+  --ignore-gitleaks-allow \
   --report-format json --report-path "$REPORT" --exit-code 1
 STATUS=$?
 set -e
