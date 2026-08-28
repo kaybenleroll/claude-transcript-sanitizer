@@ -253,7 +253,10 @@ def test_dispatch_chunk_nonzero_exit_retried_and_deferred():
 # classify_file: end-to-end with a fake caller, verifying cache writes
 # ---------------------------------------------------------------------------
 
-def test_classify_file_writes_cache_and_reports_file_flagged(tmp_path, monkeypatch):
+def test_classify_file_flagged_chunk_writes_nothing_to_cache(tmp_path, monkeypatch):
+    """Issue #12: FLAGGED verdicts must never be cache-written -- the
+    file-level report still reflects the flag, but no line-hash entry is
+    written for any line in a FLAGGED chunk."""
     mirror = tmp_path / "mirror"
     _write_jsonl(mirror / "f.jsonl", [{"a": "one"}, {"a": "two"}])
     cache_path = tmp_path / "cache.jsonl"
@@ -264,10 +267,57 @@ def test_classify_file_writes_cache_and_reports_file_flagged(tmp_path, monkeypat
 
     assert result.file_flagged is True
     assert result.chunks == 1
-    # Both lines were in the single flagged chunk -> both cached FLAGGED.
+    # Both lines were in the single flagged chunk -> neither is cached.
     lines = read_lines_bytes(mirror / "f.jsonl")
     for line in lines:
-        assert cache_get(cache_path, hash_content(line)) == "FLAGGED"
+        assert cache_get(cache_path, hash_content(line)) is None
+    assert load_cache(cache_path) == {}
+
+
+def test_classify_file_cleared_chunk_still_writes_cache(tmp_path):
+    mirror = tmp_path / "mirror"
+    _write_jsonl(mirror / "clear.jsonl", [{"a": "one"}, {"a": "two"}])
+    cache_path = tmp_path / "cache.jsonl"
+
+    caller = FakeCaller([_completed(b'{"flagged": false, "reason": "fine"}')])
+    result = classify_file("clear.jsonl", mirror, cache_path, caller, [])
+
+    assert result.file_flagged is False
+    lines = read_lines_bytes(mirror / "clear.jsonl")
+    for line in lines:
+        assert cache_get(cache_path, hash_content(line)) == "CLEARED"
+
+
+def test_classify_file_flagged_line_redispatched_and_not_poisoned_by_shared_content(tmp_path):
+    """Issue #12 core scenario: a FLAGGED chunk's content, if later seen as
+    its own cache-miss line in an unrelated file's dispatch, must be
+    re-dispatched (never short-circuited by a stale FLAGGED cache entry) and
+    is free to clear independently on that redispatch."""
+    mirror = tmp_path / "mirror"
+    shared_content = {"a": "shared boilerplate line"}
+    _write_jsonl(mirror / "bad.jsonl", [shared_content])
+    cache_path = tmp_path / "cache.jsonl"
+
+    # First dispatch: this file's chunk (containing the shared line) is
+    # flagged. Per the fix, nothing gets cache-written.
+    caller1 = FakeCaller([_completed(b'{"flagged": true, "reason": "sensitive"}')])
+    result1 = classify_file("bad.jsonl", mirror, cache_path, caller1, [])
+    assert result1.file_flagged is True
+    assert load_cache(cache_path) == {}
+
+    # Second dispatch: an unrelated file sharing the exact same line content
+    # is classified. Because the first dispatch never cached the FLAGGED
+    # verdict, this line is a cache miss and gets its own, independent
+    # dispatch -- which clears it.
+    _write_jsonl(mirror / "unrelated.jsonl", [shared_content])
+    caller2 = FakeCaller([_completed(b'{"flagged": false, "reason": "fine after all"}')])
+    result2 = classify_file("unrelated.jsonl", mirror, cache_path, caller2, [])
+
+    assert caller2.calls == 1  # actually redispatched, not skipped as a cache hit
+    assert result2.cache_hit_lines == 0
+    assert result2.file_flagged is False
+    shared_line = read_lines_bytes(mirror / "unrelated.jsonl")[0]
+    assert cache_get(cache_path, hash_content(shared_line)) == "CLEARED"
 
 
 def test_classify_file_deferred_chunk_writes_nothing_to_cache(tmp_path):

@@ -39,6 +39,15 @@ line-hash key (§6: "line hash -> CLEARED|FLAGGED"), not every line in the
 whole file. A file with an early flagged chunk and later clean chunks does
 not retroactively mark the later chunks' (unrelated) lines FLAGGED in the
 cache; the file-level FLAGGED is a reporting rollup only.
+
+Issue #12: only CLEARED verdicts are ever written to the cache. A FLAGGED
+chunk's lines are never cache-written -- a flagged line is always
+re-dispatched to the classifier on every future run until it clears or is
+otherwise handled (e.g. via the ledger). Caching FLAGGED is the corpus-wide
+poisoning channel: an unrelated file sharing that exact line's content
+would silently inherit the stale FLAGGED verdict the moment any consumer
+starts reading the cache to gate/filter. CLEARED-cache-sharing across
+unrelated files is fine and intended -- corpus-wide dedup is the point.
 """
 
 from __future__ import annotations
@@ -408,11 +417,19 @@ def classify_file(
         if outcome.status == "deferred":
             deferred_chunks += 1
             continue  # CLASSIFIER_UNAVAILABLE: no cache write for this chunk's lines
-        verdict = "FLAGGED" if outcome.flagged else "CLEARED"
         if outcome.flagged:
             file_flagged = True
+            # Never cache a FLAGGED verdict (issue #12): a flagged line must
+            # always be re-dispatched to the classifier on every future run
+            # until it clears or is otherwise handled (e.g. via the ledger).
+            # Caching FLAGGED is the corpus-wide poisoning channel -- an
+            # unrelated file sharing this exact line's content would
+            # silently inherit the stale verdict from the cache. CLEARED
+            # verdicts are still cached chunk-wide -- that sharing is the
+            # intended corpus-wide dedup behavior.
+            continue
         for line in chunk:
-            cache_put(cache_path, hash_content(line), verdict)
+            cache_put(cache_path, hash_content(line), "CLEARED")
 
     return FileClassificationResult(
         relpath=relpath,
