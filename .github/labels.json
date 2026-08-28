@@ -1,0 +1,31 @@
+[
+  { "name": "P0: critical", "category": "priority", "color": "b60205", "description": "Drop everything" },
+  { "name": "P1: high", "category": "priority", "color": "d93f0b", "description": "Next up" },
+  { "name": "P2: medium", "category": "priority", "color": "fbca04", "description": "Normal priority" },
+  { "name": "P3: backlog", "category": "priority", "color": "c5def5", "description": "No urgency" },
+
+  { "name": "type: bug", "category": "type", "color": "d73a4a", "description": "Something isn't working" },
+  { "name": "type: feature", "category": "type", "color": "0e8a16", "description": "New capability" },
+  { "name": "type: enhancement", "category": "type", "color": "a2eeef", "description": "Improvement to existing behaviour" },
+  { "name": "type: tech-debt", "category": "type", "color": "8b6b1f", "description": "Cleanup / refactor / consolidation" },
+  { "name": "type: docs", "category": "type", "color": "0075ca", "description": "Documentation only" },
+  { "name": "type: research", "category": "type", "color": "5319e7", "description": "Investigation / spike, no committed fix yet" },
+
+  { "name": "area: detection", "category": "area", "color": "5c1dd6", "description": "Recognizers, gitleaks gate, recognizer gate" },
+  { "name": "area: redaction", "category": "area", "color": "0e6ba8", "description": "Redaction engine, jsonl/text sanitizers, mirror builder" },
+  { "name": "area: sync", "category": "area", "color": "2e8b57", "description": "Ledger/cache, classifier dispatch, local sync dry run" },
+  { "name": "area: hooks", "category": "area", "color": "b5701f", "description": "Pre-commit lock work, git hooks" },
+  { "name": "area: testing", "category": "area", "color": "6f42c1", "description": "Test suite and fixtures" },
+  { "name": "area: docs", "category": "area", "color": "0969da", "description": "Documentation, README, plan files" },
+  { "name": "area: repo-meta", "category": "area", "color": "5a5a5a", "description": "CI, tooling, Justfile, config" },
+
+  { "name": "effort: XS", "category": "effort", "color": "c2e0c6", "description": "Minutes" },
+  { "name": "effort: S", "category": "effort", "color": "c2e0c6", "description": "Under an hour" },
+  { "name": "effort: M", "category": "effort", "color": "c2e0c6", "description": "A session" },
+  { "name": "effort: L", "category": "effort", "color": "c2e0c6", "description": "Multiple sessions" },
+  { "name": "effort: XL", "category": "effort", "color": "c2e0c6", "description": "Substantial, consider breaking down" },
+
+  { "name": "status: blocked", "category": "status", "color": "ededed", "description": "Waiting on something external" },
+  { "name": "status: in-progress", "category": "status", "color": "ededed", "description": "Actively being worked" },
+  { "name": "status: needs-review", "category": "status", "color": "ededed", "description": "Awaiting review/decision" }
+]
