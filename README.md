@@ -277,5 +277,6 @@ just classify-sample   # §7: classifier sample dispatch, writes .scratch/classi
 just flag <hash> "<reason>"   # ledger: deny decision
 just unflag <hash>            # ledger: allow decision (undoes a flag)
 just sync-local         # §8: local-only claude-code-sync dry run, gate 7 (gitleaks on the committed tree)
+just install-hooks      # symlink hooks/pre-push into .git/hooks/ (this repo's own source, tests+gitleaks before push)
 just --list             # all recipes
 ```

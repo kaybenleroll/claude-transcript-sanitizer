@@ -57,3 +57,10 @@ unflag hash:
 # Local-only claude-code-sync dry run against the mirror — commits into a throwaway repo, never a remote (plan §8)
 sync-local:
     bash bin/sync-local.sh
+
+# ─── Local dev hooks (this repo's own source, not the sync target) ────────────
+
+# Install this repo's own git hooks (currently: pre-push) as symlinks into .git/hooks/
+install-hooks:
+    ln -sf "$(git rev-parse --show-toplevel)/hooks/pre-push" "$(git rev-parse --show-toplevel)/.git/hooks/pre-push"
+    @echo "installed: .git/hooks/pre-push -> hooks/pre-push"

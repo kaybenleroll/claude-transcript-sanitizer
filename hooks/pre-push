@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# hooks/pre-push — local enforcement gate on THIS repo's own git history.
+#
+# Distinct from hooks/pre-commit: pre-commit redacts/blocks secrets in
+# TRANSCRIPT content being synced into an external repo via
+# claude-code-sync (installed as a symlink into a TARGET repo's
+# .git/hooks/, resolved via readlink -f back to this repo because it must
+# work regardless of which repo invoked it). This hook instead protects
+# the sanitizer tool's OWN source code, in THIS repo, at push time:
+#   (a) the test suite must pass
+#   (b) gitleaks must find no secret in the commit range about to be pushed
+#
+# --- Installation ---
+# This hook is only ever installed into the repo it lives in (never
+# symlinked into a foreign target repo the way hooks/pre-commit is), so
+# `git rev-parse --show-toplevel` at run time IS this repo -- no
+# readlink-through-a-symlink path resolution is needed here.
+#
+#   just install-hooks
+#
+# does this (see Justfile), equivalent to:
+#
+#   ln -sf "$(git rev-parse --show-toplevel)/hooks/pre-push" \
+#       "$(git rev-parse --show-toplevel)/.git/hooks/pre-push"
+#
+# --- git's pre-push stdin protocol ---
+# git feeds one line per ref being pushed on stdin:
+#   <local ref> <local sha1> <remote ref> <remote sha1>
+# local_sha1 all-zero  => deleting the remote ref, nothing to scan.
+# remote_sha1 all-zero => new ref on the remote; there is no remote tip to
+#   diff against, so the range check below falls back to a bounded scan of
+#   the full history reachable from local_sha1 (not the whole repo across
+#   every ref) -- cheap and thorough for this repo's size.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+ZERO_SHA="0000000000000000000000000000000000000000"
+
+# --- Stage 1: test suite ---
+# `uv` resolves via an interactive-shell alias on this machine (`uv='sfw
+# uv'`), which is NOT visible here -- git execs a hook by its own shebang,
+# never through the pushing shell, so shell aliases never apply to it.
+# Fail closed with a clear message rather than silently skipping the test
+# run if `uv` isn't a real PATH entry in this hook's environment.
+echo "=== pre-push: test suite ==="
+if ! command -v uv >/dev/null 2>&1; then
+  echo "BLOCKED: 'uv' not found on PATH -- cannot run the test suite." >&2
+  echo "(a shell alias for uv, if that's how you normally invoke it, is NOT" >&2
+  echo "visible to a git hook -- git execs hooks directly by their shebang," >&2
+  echo "not through your interactive shell. Put the real uv binary/shim on" >&2
+  echo "PATH, e.g. mise's shims dir.)" >&2
+  exit 1
+fi
+
+if ! uv run pytest tests/ -q; then
+  echo
+  echo "BLOCKED: test suite failed. Push aborted." >&2
+  exit 1
+fi
+echo "tests: passed."
+echo
+
+# --- Stage 2: gitleaks over the commit range about to be pushed ---
+# Same GITLEAKS_BIN resolution as hooks/pre-commit (a hardcoded mise
+# install path, not `mise exec --` -- a git hook's environment can't be
+# relied on to have mise's shims/activation on PATH any more than uv's
+# alias above). `gitleaks git` (history mode), not `gitleaks dir` --
+# bin/gitleaks-gate.sh's `gitleaks dir` scans a materialized directory
+# tree with no commit history of its own; this hook scans actual commits
+# about to enter the remote's history. --config pins this repo's own
+# .gitleaks.toml explicitly (not left to gitleaks' cwd-based default
+# resolution) and --ignore-gitleaks-allow matches hooks/pre-commit's
+# convention: an inline `gitleaks:allow` comment does not suppress a real
+# finding in a genuine secret leak, only .gitleaks.toml (reviewed,
+# version-controlled) can.
+GITLEAKS_BIN="$HOME/.local/share/mise/installs/gitleaks/8.30.1/gitleaks"
+if [[ ! -x "$GITLEAKS_BIN" ]]; then
+  echo "BLOCKED: gitleaks binary not found at $GITLEAKS_BIN." >&2
+  echo "(same resolution convention as hooks/pre-commit's GITLEAKS_BIN)" >&2
+  exit 1
+fi
+
+echo "=== pre-push: gitleaks (commit range about to be pushed) ==="
+FOUND_SECRET=0
+HAD_REFS=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  HAD_REFS=1
+
+  if [[ "$local_sha" == "$ZERO_SHA" ]]; then
+    echo "  $local_ref: deleting remote ref, nothing to scan"
+    continue
+  fi
+
+  if [[ "$remote_sha" == "$ZERO_SHA" ]]; then
+    echo "  $local_ref: new remote ref, scanning full history of $local_sha"
+    LOG_OPTS="$local_sha"
+  else
+    echo "  $local_ref: scanning $remote_sha..$local_sha"
+    LOG_OPTS="$remote_sha..$local_sha"
+  fi
+
+  set +e
+  "$GITLEAKS_BIN" git "$REPO_ROOT" --log-opts="$LOG_OPTS" --redact --no-banner \
+    --config "$REPO_ROOT/.gitleaks.toml" --ignore-gitleaks-allow --exit-code 7
+  RC=$?
+  set -e
+
+  if [[ "$RC" -eq 7 ]]; then
+    FOUND_SECRET=1
+  elif [[ "$RC" -ne 0 ]]; then
+    echo "BLOCKED: gitleaks failed to run (exit $RC) for $local_ref -- this is a" >&2
+    echo "tool failure, not a detected secret. Check the gitleaks binary and" >&2
+    echo "$REPO_ROOT/.gitleaks.toml." >&2
+    exit 1
+  fi
+done
+
+if [[ "$FOUND_SECRET" -eq 1 ]]; then
+  echo
+  echo "BLOCKED: gitleaks found a likely secret in the commit range being pushed." >&2
+  echo "Push aborted. Rotate/remove it and rewrite history before pushing -- do" >&2
+  echo "not add a gitleaks:allow comment or .gitleaksignore entry to suppress" >&2
+  echo "it. A genuine false positive is fixed by adding a rule to this repo's" >&2
+  echo "own .gitleaks.toml, which is version-controlled and reviewable." >&2
+  exit 1
+fi
+
+echo "gitleaks: clean."
+exit 0

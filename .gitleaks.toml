@@ -42,6 +42,26 @@
 [extend]
 useDefault = true
 
+# hooks/pre-push (added alongside this block): the first thing in this
+# repo's history to run gitleaks over the repo's OWN SOURCE TREE (every
+# other gitleaks invocation here -- bin/gitleaks-gate.sh, hooks/pre-commit
+# -- scans transcript/mirror content, never this repo's own tests/).
+# tests/ deliberately contains shape-valid FAKE credentials (AWS/GitHub/
+# Stripe/Groq/private-key shapes, `ghp_FAKE...`, `AKIAQ4ZKN7TG5XW2JLPD`,
+# etc.) as fixtures for sanitize/recognizers.py's own test suite --
+# verified empirically: a first pre-push run against this repo's own
+# baseline commit found 28 genuine-shape findings, all four flagged files
+# under tests/, all synthetic fixture data, zero real leaked credentials.
+# Scoped to the whole tests/ directory rather than per-file: the entire
+# point of these tests is exercising credential-shape detection, so
+# fixture secrets are expected throughout, not just in the files that
+# happened to trip this rule set today.
+[allowlist]
+description = "tests/ fixtures contain deliberately fake credential shapes for sanitize/recognizers.py's own test coverage"
+paths = [
+  '''^tests/.*''',
+]
+
 [[rules]]
 id = "anthropic-api-key-reanchored"
 description = "Anthropic API key (sk-ant-), re-anchored to catch escape-residue-preceded matches gitleaks' default anthropic-api-key rule misses"
