@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -168,3 +171,55 @@ def test_write_target_allowed_outside_claude_projects(tmp_path, monkeypatch):
 
     good_target = tmp_path / "sanitized-mirror" / "projects" / "proj1" / "out.jsonl"
     assert_write_target_safe(good_target) is None
+
+
+# --------------------------------------------------------------------------
+# Issue #10 — DEFAULT_REDACTION_LOG_PATH must honor SANITIZER_STATE_DIR,
+# like every bin/*.sh script and bin/lib/lock.sh already do, instead of
+# hardcoding Path.home(). DEFAULT_REDACTION_LOG_PATH is a module-level
+# constant computed at import time, so each check runs in its OWN fresh
+# subprocess rather than importlib.reload()-ing sanitize.jsonl in-process:
+# a reload replaces the module's class/function objects (MalformedLineError
+# included) with new ones while sanitize.mirror's already-imported
+# `from sanitize.jsonl import MalformedLineError` reference stays the OLD
+# class, silently breaking its `except MalformedLineError` handling for the
+# rest of the test session (found while writing this test -- it broke three
+# unrelated tests in test_mirror.py). A subprocess isolates each check
+# cleanly with no such cross-test pollution.
+# --------------------------------------------------------------------------
+
+
+def test_default_redaction_log_path_honors_sanitizer_state_dir(tmp_path: Path):
+    state_dir = tmp_path / "custom-sanitizer-state"
+    result = subprocess.run(
+        [
+            sys.executable, "-c",
+            "from sanitize.jsonl import DEFAULT_REDACTION_LOG_PATH, RedactionStats, write_redaction_log\n"
+            "print(DEFAULT_REDACTION_LOG_PATH)\n"
+            "stats = RedactionStats()\n"
+            "stats.add(['ANTHROPIC_API_KEY'])\n"
+            "write_redaction_log(stats, DEFAULT_REDACTION_LOG_PATH)\n",
+        ],
+        cwd=Path(__file__).resolve().parent.parent,
+        env={**os.environ, "SANITIZER_STATE_DIR": str(state_dir)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == str(state_dir / "redaction-log.jsonl")
+    assert (state_dir / "redaction-log.jsonl").exists()
+
+
+def test_default_redaction_log_path_falls_back_to_home_without_override(tmp_path: Path):
+    env = dict(os.environ)
+    env.pop("SANITIZER_STATE_DIR", None)
+    result = subprocess.run(
+        [sys.executable, "-c", "from sanitize.jsonl import DEFAULT_REDACTION_LOG_PATH\nprint(DEFAULT_REDACTION_LOG_PATH)\n"],
+        cwd=Path(__file__).resolve().parent.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = Path.home() / ".local" / "state" / "claude-transcript-sanitizer" / "redaction-log.jsonl"
+    assert result.stdout.strip() == str(expected)

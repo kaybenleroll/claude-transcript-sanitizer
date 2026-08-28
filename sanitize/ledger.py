@@ -23,7 +23,18 @@ from pathlib import Path
 
 LEDGER_VERSION = 1
 
-DEFAULT_LEDGER_PATH = Path.home() / ".local" / "state" / "claude-transcript-sanitizer" / "overrides.jsonl"
+
+def _state_dir() -> Path:
+    """Resolve the sanitizer state dir, honoring SANITIZER_STATE_DIR like
+    every bin/*.sh script and bin/lib/lock.sh (see e.g.
+    bin/gitleaks-gate.sh:11, bin/lib/lock.sh's lock_state_dir)."""
+    override = os.environ.get("SANITIZER_STATE_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".local" / "state" / "claude-transcript-sanitizer"
+
+
+DEFAULT_LEDGER_PATH = _state_dir() / "overrides.jsonl"
 
 
 class InvalidDecisionError(ValueError):

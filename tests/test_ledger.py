@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -80,3 +83,51 @@ def test_independent_hashes_do_not_interfere(tmp_path: Path):
     unflag(ledger, "h2")
     assert current_decision(ledger, "h1").decision == "deny"
     assert current_decision(ledger, "h2").decision == "allow"
+
+
+# --------------------------------------------------------------------------
+# Issue #10 — DEFAULT_LEDGER_PATH must honor SANITIZER_STATE_DIR, like every
+# bin/*.sh script and bin/lib/lock.sh already do, instead of hardcoding
+# Path.home(). DEFAULT_LEDGER_PATH is a module-level constant computed at
+# import time, so each check runs in its OWN fresh subprocess rather than
+# importlib.reload()-ing sanitize.ledger in-process: a reload replaces the
+# module's class/function objects with new ones while other already-loaded
+# modules (e.g. sanitize.mirror, which does `from sanitize.jsonl import
+# MalformedLineError`) keep their old references, breaking `except`/
+# isinstance checks for the rest of the test session. A subprocess isolates
+# each check cleanly with no such cross-test pollution.
+# --------------------------------------------------------------------------
+
+
+def test_default_ledger_path_honors_sanitizer_state_dir(tmp_path: Path):
+    state_dir = tmp_path / "custom-sanitizer-state"
+    result = subprocess.run(
+        [
+            sys.executable, "-c",
+            "from sanitize.ledger import DEFAULT_LEDGER_PATH, flag\n"
+            "print(DEFAULT_LEDGER_PATH)\n"
+            "flag(DEFAULT_LEDGER_PATH, 'h1', 'test')\n",
+        ],
+        cwd=Path(__file__).resolve().parent.parent,
+        env={**os.environ, "SANITIZER_STATE_DIR": str(state_dir)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == str(state_dir / "overrides.jsonl")
+    assert (state_dir / "overrides.jsonl").exists()
+
+
+def test_default_ledger_path_falls_back_to_home_without_override(tmp_path: Path):
+    env = dict(os.environ)
+    env.pop("SANITIZER_STATE_DIR", None)
+    result = subprocess.run(
+        [sys.executable, "-c", "from sanitize.ledger import DEFAULT_LEDGER_PATH\nprint(DEFAULT_LEDGER_PATH)\n"],
+        cwd=Path(__file__).resolve().parent.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = Path.home() / ".local" / "state" / "claude-transcript-sanitizer" / "overrides.jsonl"
+    assert result.stdout.strip() == str(expected)
